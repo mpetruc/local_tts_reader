@@ -81,46 +81,72 @@ async function populateVoices() {
   } catch {
     base = baseUrl;
   }
-  const voicesUrl = `${base}/v1/audio/voices`;
 
+  // Try multiple endpoint patterns in priority order:
+  // 1. /v1/audio/voices  — Kokoro, OpenAI-compatible backends
+  // 2. /v1/voices         — Omnivoice
+  const voiceEndpoints = [
+    `${base}/v1/audio/voices`,
+    `${base}/v1/voices`,
+  ];
+
+  for (const url of voiceEndpoints) {
+    const voices = await fetchVoices(url);
+    if (voices.length > 0) {
+      _fillVoiceSelect(voiceSelect, voices);
+      return;
+    }
+  }
+
+  // All endpoints failed — keep existing options
+  console.error('Failed to populate voices from any endpoint');
+}
+
+/**
+ * Fetch voices from a single endpoint and normalise the response.
+ * Returns an array of {id, label} objects, or [] on any failure.
+ */
+async function fetchVoices(url) {
   try {
-    const resp = await fetch(voicesUrl);
-    if (!resp.ok) throw new Error('Voice endpoint not reachable');
+    const resp = await fetch(url);
+    if (!resp.ok) return [];
     const data = await resp.json();
 
     // Normalize: backends return either string[] or {id, name, ...}[]
     const raw = Array.isArray(data.voices) ? data.voices
       : Array.isArray(data) ? data
       : [];
-    if (raw.length === 0) throw new Error('Empty voice list');
+    if (raw.length === 0) return [];
 
-    const voices = raw.map(v => {
+    return raw.map(v => {
       if (typeof v === 'string') return { id: v, label: v.replace(/_/g, ' ') };
       const id = v.id || v.voice_id || v.name || '';
       const label = v.name || v.id || v.voice_id || '';
       return { id, label };
     }).filter(v => v.id);
+  } catch {
+    return [];
+  }
+}
 
-    // Preserve current selection if possible
-    const current = voiceSelect.value;
+/**
+ * Populate the <select> element with a list of {id, label} voices,
+ * preserving the current selection if possible.
+ */
+function _fillVoiceSelect(voiceSelect, voices) {
+  const current = voiceSelect.value;
+  voiceSelect.innerHTML = '';
 
-    // Clear existing options only on successful fetch
-    voiceSelect.innerHTML = '';
+  for (const v of voices) {
+    const opt = document.createElement('option');
+    opt.value = v.id;
+    opt.textContent = v.label;
+    voiceSelect.appendChild(opt);
+  }
 
-    for (const v of voices) {
-      const opt = document.createElement('option');
-      opt.value = v.id;
-      opt.textContent = v.label;
-      voiceSelect.appendChild(opt);
-    }
-
-    // Restore previous selection if still present
-    if (Array.from(voiceSelect.options).some(o => o.value === current)) {
-      voiceSelect.value = current;
-    }
-  } catch (_) {
-    // On failure, keep existing options and log error
-    console.error('Failed to populate voices');
+  // Restore previous selection if still present
+  if (Array.from(voiceSelect.options).some(o => o.value === current)) {
+    voiceSelect.value = current;
   }
 }
 
