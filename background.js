@@ -427,9 +427,10 @@ async function startStreamingAudio(text, settings) {
           'Accept': 'audio/mpeg, audio/wav, audio/*'
         },
         body: JSON.stringify({
-          model: 'tts-1',
+          model: settings.model,
           voice: settings.voice,
-          input: text
+          input: text,
+          response_format: 'pcm'
         })
       });
 
