@@ -1,4 +1,4 @@
-const VERSION = '4a9aa5b';
+const VERSION = 'c0ac639';
 let offscreenTabId = null;
 
 // Create or get the offscreen document.
@@ -22,33 +22,22 @@ async function setupOffscreenDocument() {
   });
   console.log(`[BG]${VERSION} Offscreen document created`);
 
-  // Try to find the offscreen tab using tabs.query with no filter
+  // Wait for the offscreen to load. Use getContexts polling.
   const MAX_RETRIES = 30;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const tabs = await chrome.tabs.query({});
-    for (const t of tabs) {
-      // Offscreen tabs have chrome-extension://<id>/offscreen.html or
-      // chrome-extension://<id>/offscreen.html?... or about:blank
-      if (t.url && (t.url.includes('offscreen.html') || t.url.includes(chrome.runtime.id))) {
-        offscreenTabId = t.id;
-        console.log(`[BG]${VERSION} Offscreen tab ID: ${offscreenTabId} (url: ${t.url})`);
-        return;
-      }
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT']
+    });
+    if (contexts.length > 0 && contexts[0].tab && contexts[0].tab.id) {
+      offscreenTabId = contexts[0].tab.id;
+      offscreenDocument = contexts[0];
+      console.log(`[BG]${VERSION} Offscreen tab ID: ${offscreenTabId}`);
+      return;
     }
     await new Promise(r => setTimeout(r, 100));
   }
 
-  // Fallback: try getContexts one more time
-  const fallback = await chrome.runtime.getContexts({
-    contextTypes: ['OFFSCREEN_DOCUMENT']
-  });
-  if (fallback.length > 0 && fallback[0].tab && fallback[0].tab.id) {
-    offscreenTabId = fallback[0].tab.id;
-    console.log(`[BG]${VERSION} Offscreen tab ID (fallback): ${offscreenTabId}`);
-    return;
-  }
-
-  // Log all tabs for debugging
+  // Fallback: try tabs.query with no filter
   const allTabs = await chrome.tabs.query({});
   console.warn(`[BG]${VERSION} Offscreen tab not found. All tabs:`, JSON.stringify(allTabs.map(t => ({ id: t.id, url: t.url }))));
 }
