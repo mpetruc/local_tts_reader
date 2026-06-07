@@ -1,4 +1,4 @@
-const VERSION = 'edee4ba';
+const VERSION = '4a9aa5b';
 let offscreenTabId = null;
 
 // Create or get the offscreen document.

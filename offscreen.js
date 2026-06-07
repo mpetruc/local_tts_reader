@@ -1,4 +1,4 @@
-const VERSION = 'edee4ba';
+const VERSION = '4a9aa5b';
 let audioElement = null;
 let isPlaying = false;
 let audioChunks = [];
