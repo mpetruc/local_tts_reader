@@ -28,23 +28,12 @@ async function setupOffscreenDocument() {
   });
   console.log('[BG] Offscreen document created');
 
-  // Wait for the offscreen to load and register its message listener
-  const readyContexts = await chrome.runtime.getContexts({
-    contextTypes: ['OFFSCREEN_DOCUMENT']
-  });
-  const offscreenTabId = readyContexts[0].tab.id;
-
-  // Poll until the offscreen responds
-  const MAX_RETRIES = 20;
+  // Wait for the offscreen to load and register its message listener.
+  // Use runtime.sendMessage (no tab ID needed) with retries.
+  const MAX_RETRIES = 30;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const [resp] = await Promise.all([
-        new Promise(resolve => {
-          chrome.tabs.sendMessage(offscreenTabId, { type: 'ping' }, resp => resolve(resp));
-        }),
-        // Small delay to let DOMContentLoaded fire
-        new Promise(r => setTimeout(r, 50))
-      ]);
+      const resp = await chrome.runtime.sendMessage({ type: 'ping' });
       if (resp && resp.ok) {
         console.log('[BG] Offscreen is ready (attempt', attempt + 1, ')');
         return;
@@ -56,7 +45,6 @@ async function setupOffscreenDocument() {
   }
   console.warn('[BG] Offscreen did not respond to ping after', MAX_RETRIES, 'attempts');
 }
-
 // Set up context menu items
 function setupContextMenu() {
   chrome.contextMenus.create({
