@@ -14,42 +14,6 @@ function initAudio() {
   }
 }
 
-
-// Wrap raw PCM bytes (int16 little-endian) in a minimal WAV header
-// so the browser <audio> element can decode and play it.
-function pcmToWav(pcmBytes, sampleRate) {
-  const numChannels = 1;
-  const bitsPerSample = 16;
-  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
-  const blockAlign = numChannels * (bitsPerSample / 8);
-  const dataSize = pcmBytes.length;
-  const headerSize = 44;
-  const wav = new Uint8Array(headerSize + dataSize);
-  const view = new DataView(wav.buffer);
-
-  // RIFF header
-  view.setUint32(0, 0x52494646, false); // 'RIFF'
-  view.setUint32(4, headerSize + dataSize - 8, true);
-  view.setUint32(8, 0x57415645, false); // 'WAVE'
-
-  // fmt subchunk
-  view.setUint32(12, 0x666d7420, false); // 'fmt '
-  view.setUint32(16, 16, true);          // subchunk1 size (16 for PCM)
-  view.setUint16(20, 1, true);           // audio format (1 = PCM)
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-
-  // data subchunk
-  view.setUint32(36, 0x64617461, false); // 'data'
-  view.setUint32(40, dataSize, true);
-
-  // Copy PCM samples
-  wav.set(pcmBytes, headerSize);
-  return wav;
-}
 // Process audio data received from background script
 function processAudioData(audioDataArray, mimeType) {
   try {
@@ -58,17 +22,8 @@ function processAudioData(audioDataArray, mimeType) {
     // Convert array back to Uint8Array
     const uint8Array = new Uint8Array(audioDataArray);
     
-    let finalBytes = uint8Array;
-    let finalMimeType = mimeType;
-    
-    // Wrap raw PCM in a WAV header so <audio> can play it
-    if (mimeType && mimeType.includes('pcm')) {
-      finalBytes = pcmToWav(uint8Array, 24000);
-      finalMimeType = 'audio/wav';
-    }
-    
     // Create blob from the array
-    const blob = new Blob([finalBytes], { type: finalMimeType });
+    const blob = new Blob([uint8Array], { type: mimeType });
     
     // Create URL for the blob
     const audioUrl = URL.createObjectURL(blob);
