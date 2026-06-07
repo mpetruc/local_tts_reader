@@ -148,6 +148,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Offscreen received message:', message.type);
   
   switch (message.type) {
+    case 'ping':
+      sendResponse({ ok: true });
+      return true;
     case 'clearChunks':
       audioChunks = [];
       break;
