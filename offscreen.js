@@ -125,6 +125,18 @@ function seekTo(time) {
   }
 }
 
+// Helper: concat arrays without hitting V8's spread-argument limit
+function concatAll(arrays) {
+  const result = [];
+  for (const arr of arrays) {
+    const BATCH = 65536;
+    for (let i = 0; i < arr.length; i += BATCH) {
+      result.push(...arr.slice(i, i + BATCH));
+    }
+  }
+  return result;
+}
+
 // Handle messages from the background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Offscreen received message:', message.type);
@@ -134,8 +146,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Store chunk at its index
       audioChunks[message.index] = message.chunk;
       if (message.isLast) {
-        // Combine all chunks
-        const combined = [].concat(...audioChunks);
+        // Combine all chunks — use concatAll to avoid V8 argument limit
+        const combined = concatAll(audioChunks);
         processAudioData(combined, message.mimeType);
         audioChunks = [];
       }
