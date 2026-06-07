@@ -331,6 +331,21 @@ async function sendAudioChunks(audioBytes, mimeType) {
   const totalChunks = Math.ceil(audioBytes.length / CHUNK_SIZE);
   console.log('[BG] Sending', totalChunks, 'audio chunks (', audioBytes.length, 'bytes total)');
 
+  // Wait for offscreen to be ready (poll ping until we get a response)
+  const MAX_RETRIES = 30;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'ping' });
+      if (resp && resp.ok) {
+        console.log('[BG] Offscreen is ready');
+        break;
+      }
+    } catch (err) {
+      console.log('[BG] Offscreen not ready yet:', err.message);
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+
   // Tell offscreen to clear any previous state
   chrome.runtime.sendMessage({ type: 'clearChunks' });
 
