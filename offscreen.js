@@ -9,10 +9,9 @@ function concatAll(chunks) {
   let offset = 0;
   for (let i = 0; i < chunks.length; i++) {
     if (!chunks[i]) continue;
-    for (let j = 0; j < chunks[i].length; j += BATCH) {
-      const slice = chunks[i].slice(j, j + BATCH);
-      result.set(slice, offset);
-      offset += slice.length;
+    const src = chunks[i];
+    for (let j = 0; j < src.length; j++) {
+      result[offset++] = src[j];
     }
   }
   return result;
