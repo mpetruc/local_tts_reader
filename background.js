@@ -5,20 +5,19 @@ let currentPlayerState = 'stopped';
 let currentSentences = null;
 let currentHighlightTabId = null;
 let currentSentenceIndex = -1;
-// Create or get the offscreen document — always recreate to ensure
-// the offscreen loads the latest code after an extension reload.
+// Create or get the offscreen document.
+// Reuse existing if available (it may be running stale code after reload,
+// but at least it works). Create new only if none exists.
 async function setupOffscreenDocument() {
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT']
   });
 
-  // Destroy any existing offscreen (may be running stale code)
-  for (const ctx of existingContexts) {
-    try {
-      await chrome.tabs.remove(ctx.tab.id);
-    } catch (_) {
-      // already closed
-    }
+  if (existingContexts.length > 0) {
+    offscreenDocument = existingContexts[0];
+    offscreenTabId = existingContexts[0].tab.id;
+    console.log('[BG] Reusing existing offscreen tab', offscreenTabId);
+    return;
   }
 
   await chrome.offscreen.createDocument({
@@ -28,47 +27,21 @@ async function setupOffscreenDocument() {
   });
   console.log('[BG] Offscreen document created');
 
-  // Wait for the offscreen to load. Use getContexts to get the tab ID,
-  // then use chrome.tabs.sendMessage (more reliable for offscreen).
+  // Wait for the offscreen to load and get its tab ID
   const MAX_RETRIES = 30;
-  let tabId = null;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const contexts = await chrome.runtime.getContexts({
       contextTypes: ['OFFSCREEN_DOCUMENT']
     });
     if (contexts.length > 0 && contexts[0].tab && contexts[0].tab.id) {
-      tabId = contexts[0].tab.id;
-      offscreenTabId = tabId;
-      break;
-    }
-    }
-    await new Promise(r => setTimeout(r, 100));
-  }
-  if (!tabId) {
-    console.warn('[BG] Offscreen tab ID not found after', MAX_RETRIES, 'attempts');
-    return;
-  }
-  console.log('[BG] Offscreen tab ID:', tabId);
-
-  // Poll until the offscreen responds
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    try {
-      const resp = await new Promise((resolve, reject) => {
-        chrome.tabs.sendMessage(tabId, { type: 'ping' }, r => {
-          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-          else resolve(r);
-        });
-      });
-      if (resp && resp.ok) {
-        console.log('[BG] Offscreen is ready (attempt', attempt + 1, ')');
-        return;
-      }
-    } catch (_) {
-      // Not ready yet
+      offscreenTabId = contexts[0].tab.id;
+      offscreenDocument = contexts[0];
+      console.log('[BG] Offscreen tab ID:', offscreenTabId);
+      return;
     }
     await new Promise(r => setTimeout(r, 100));
   }
-  console.warn('[BG] Offscreen did not respond to ping after', MAX_RETRIES, 'attempts');
+  console.warn('[BG] Offscreen tab ID not found after', MAX_RETRIES, 'attempts');
 }
 // Set up context menu items
 function setupContextMenu() {
