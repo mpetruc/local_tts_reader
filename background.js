@@ -5,24 +5,56 @@ let currentSentences = null;
 let currentHighlightTabId = null;
 let currentSentenceIndex = -1;
 
-// Create or get the offscreen document
+// Create or get the offscreen document — always recreate to ensure
+// the offscreen loads the latest code after an extension reload.
 async function setupOffscreenDocument() {
-  // Check if we already have an offscreen document
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT']
   });
 
-  if (existingContexts.length > 0) {
-    offscreenDocument = existingContexts[0];
-    return;
+  // Destroy any existing offscreen (may be running stale code)
+  for (const ctx of existingContexts) {
+    try {
+      await chrome.tabs.remove(ctx.tab.id);
+    } catch (_) {
+      // already closed
+    }
   }
 
-  // Create an offscreen document
   await chrome.offscreen.createDocument({
     url: 'offscreen.html',
     reasons: ['AUDIO_PLAYBACK'],
     justification: 'Playing TTS audio in the background'
   });
+  console.log('[BG] Offscreen document created');
+
+  // Wait for the offscreen to load and register its message listener
+  const readyContexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT']
+  });
+  const offscreenTabId = readyContexts[0].tab.id;
+
+  // Poll until the offscreen responds
+  const MAX_RETRIES = 20;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const [resp] = await Promise.all([
+        new Promise(resolve => {
+          chrome.tabs.sendMessage(offscreenTabId, { type: 'ping' }, resp => resolve(resp));
+        }),
+        // Small delay to let DOMContentLoaded fire
+        new Promise(r => setTimeout(r, 50))
+      ]);
+      if (resp && resp.ok) {
+        console.log('[BG] Offscreen is ready (attempt', attempt + 1, ')');
+        return;
+      }
+    } catch (_) {
+      // Not ready yet
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  console.warn('[BG] Offscreen did not respond to ping after', MAX_RETRIES, 'attempts');
 }
 
 // Set up context menu items
@@ -187,14 +219,27 @@ case 'startStreaming':
       return true;
       
     case 'audioReady':
+      console.log('[BG] Offscreen: audio is ready');
       // Audio is ready but not yet playing
       if (currentPlayerState === 'loading') {
         currentPlayerState = 'ready';
-        chrome.runtime.sendMessage({ 
-          type: 'playerStateUpdate', 
-          state: 'ready' 
+        chrome.runtime.sendMessage({
+          type: 'playerStateUpdate',
+          state: 'ready'
         });
       }
+      return true;
+
+    case 'chunksProcessed':
+      console.log('[BG] Offscreen: chunks combined, total length:', message.length);
+      return true;
+
+    case 'streamError':
+      console.error('[BG] Offscreen error:', message.error);
+      chrome.runtime.sendMessage({
+        type: 'streamError',
+        error: message.error
+      });
       return true;
       
     case 'getPlayerState':
@@ -360,7 +405,6 @@ async function sendAudioChunks(audioBytes, mimeType) {
 async function startStreamingAudio(text, settings) {
   try {
     await setupOffscreenDocument();
-    chrome.runtime.sendMessage({ type: 'offscreenReady' });
 
     // Validate voice selection before proceeding
     if (!settings.voice || typeof settings.voice !== 'string' || settings.voice.trim() === '') {

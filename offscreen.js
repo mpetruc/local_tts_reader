@@ -146,6 +146,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Offscreen received message:', message.type);
   
   switch (message.type) {
+    case 'ping':
+      sendResponse({ ok: true });
+      return true;
     case 'clearChunks':
       audioChunks = [];
       console.log('[OFFSCREEN] Chunks cleared');
@@ -163,11 +166,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const combined = concatAll(audioChunks);
           console.log('[OFFSCREEN] Combined array length:', combined.length);
           processAudioData(combined, message.mimeType);
+          // Confirm to background so it's visible in BG console too
+          chrome.runtime.sendMessage({ type: 'chunksProcessed', length: combined.length });
         } catch (err) {
           console.error('[OFFSCREEN] Failed to combine chunks:', err);
           chrome.runtime.sendMessage({ type: 'streamError', error: err.message });
         }
         audioChunks = [];
+</parameter>        } catch (err) {          console.error('[OFFSCREEN] Failed to combine chunks:', err);          chrome.runtime.sendMessage({ type: 'streamError', error: err.message });        }        audioChunks = [];</parameter>      }      }</parameter>      }      }
       }
       break;
     }
