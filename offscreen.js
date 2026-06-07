@@ -1,4 +1,22 @@
-const VERSION = '4a9aa5b';
+// Batched concat to avoid V8's ~655K argument limit
+function concatAll(chunks) {
+  const BATCH = 65536;
+  let totalLen = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    if (chunks[i]) totalLen += chunks[i].length;
+  }
+  const result = new Array(totalLen);
+  let offset = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    if (!chunks[i]) continue;
+    for (let j = 0; j < chunks[i].length; j += BATCH) {
+      const slice = chunks[i].slice(j, j + BATCH);
+      result.set(slice, offset);
+      offset += slice.length;
+    }
+  }
+  return result;
+}
 let audioElement = null;
 let isPlaying = false;
 let audioChunks = [];
@@ -19,30 +37,26 @@ function initAudio() {
 function processAudioData(audioDataArray, mimeType) {
   try {
     initAudio();
-    console.log(`[OFFSCREEN]${VERSION} processAudioData: input array length`, audioDataArray.length, 'mimeType:', mimeType);
-
+    
     // Convert array back to Uint8Array
     const uint8Array = new Uint8Array(audioDataArray);
-    console.log(`[OFFSCREEN]${VERSION} Uint8Array created, length:`, uint8Array.length);
-
+    
     // Create blob from the array
     const blob = new Blob([uint8Array], { type: mimeType });
-    console.log(`[OFFSCREEN]${VERSION} Blob created, size:`, blob.size, 'type:', blob.type);
-
+    
     // Create URL for the blob
     const audioUrl = URL.createObjectURL(blob);
-    console.log(`[OFFSCREEN]${VERSION} Object URL created`);
-
+    
     // Play the audio
     playAudioUrl(audioUrl);
-
+    
     // Notify that audio is ready to play
     chrome.runtime.sendMessage({ type: 'audioReady' });
   } catch (error) {
-    console.error(`[OFFSCREEN]${VERSION} Error processing audio data:`, error);
-    chrome.runtime.sendMessage({
-      type: 'streamError',
-      error: error.message
+    console.error('Error processing audio data:', error);
+    chrome.runtime.sendMessage({ 
+      type: 'streamError', 
+      error: error.message 
     });
   }
 }
@@ -130,53 +144,25 @@ function seekTo(time) {
   }
 }
 
-// Helper: concat arrays without hitting V8's spread-argument limit
-function concatAll(arrays) {
-  const result = [];
-  for (const arr of arrays) {
-    const BATCH = 65536;
-    for (let i = 0; i < arr.length; i += BATCH) {
-      result.push(...arr.slice(i, i + BATCH));
-    }
-  }
-  return result;
-}
-
 // Handle messages from the background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Offscreen received message:', message.type);
   
   switch (message.type) {
-    case 'ping':
-      sendResponse({ ok: true });
-      return true;
     case 'clearChunks':
       audioChunks = [];
-      console.log(`[OFFSCREEN]${VERSION} Chunks cleared`);
       break;
-    case 'audioChunk': {
+    case 'audioChunk':
       // Store chunk at its index
-      const chunk = message.chunk;
-      console.log(`[OFFSCREEN]${VERSION} Chunk`, message.index, 'received, length:', chunk ? chunk.length : 'null', 'isLast:', message.isLast);
-      audioChunks[message.index] = chunk;
+      audioChunks[message.index] = message.chunk;
       if (message.isLast) {
-        const expected = audioChunks.length;
-        const holes = audioChunks.filter(c => c === undefined).length;
-        console.log(`[OFFSCREEN]${VERSION} Last chunk. Total slots:`, expected, 'Holes:', holes);
-        try {
-          const combined = concatAll(audioChunks);
-          console.log(`[OFFSCREEN]${VERSION} Combined array length:`, combined.length);
-          processAudioData(combined, message.mimeType);
-          // Confirm to background so it's visible in BG console too
-          chrome.runtime.sendMessage({ type: 'chunksProcessed', length: combined.length });
-        } catch (err) {
-          console.error(`[OFFSCREEN]${VERSION} Failed to combine chunks:`, err);
-          chrome.runtime.sendMessage({ type: 'streamError', error: err.message });
-        }
+        // Combine all chunks using batched concat
+        const combined = concatAll(audioChunks);
+        console.log('[OFFSCREEN] Combined array length:', combined.length);
+        processAudioData(combined, message.mimeType);
         audioChunks = [];
       }
       break;
-    }
     case 'processAudioData':
       if (message.audioData) {
         processAudioData(message.audioData, message.mimeType);
