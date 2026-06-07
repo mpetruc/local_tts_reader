@@ -323,22 +323,37 @@ function uint8ArrayToBase64(bytes) {
 }
 
 // Send audio bytes to offscreen document in chunks
-function sendAudioChunks(audioBytes, mimeType) {
-  const CHUNK_SIZE = 4 * 1024 * 1024; // 4MiB
+// Chunk size kept small (256KB) to stay under Chrome's internal
+// sendMessage payload limit (structured-clone of a plain Array of
+// numbers is ~7x the raw byte size).
+async function sendAudioChunks(audioBytes, mimeType) {
+  const CHUNK_SIZE = 256 * 1024; // 256 KB
   const totalChunks = Math.ceil(audioBytes.length / CHUNK_SIZE);
+  console.log('[BG] Sending', totalChunks, 'audio chunks (', audioBytes.length, 'bytes total)');
+
+  // Tell offscreen to clear any previous state
+  chrome.runtime.sendMessage({ type: 'clearChunks' });
+
   for (let i = 0; i < totalChunks; i++) {
     const start = i * CHUNK_SIZE;
     const end = Math.min(start + CHUNK_SIZE, audioBytes.length);
     const chunkArray = Array.from(audioBytes.slice(start, end));
-    chrome.runtime.sendMessage({
-      type: 'audioChunk',
-      chunk: chunkArray,
-      index: i,
-      isLast: i === totalChunks - 1,
-      mimeType: mimeType,
-      isRecording: isRecording
-    });
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'audioChunk',
+        chunk: chunkArray,
+        index: i,
+        isLast: i === totalChunks - 1,
+        mimeType: mimeType,
+        isRecording: isRecording
+      });
+      console.log('[BG] Chunk', i, '/', totalChunks - 1, 'sent (', chunkArray.length, 'elements)');
+    } catch (err) {
+      console.error('[BG] Failed to send chunk', i, ':', err);
+      throw err;
+    }
   }
+  console.log('[BG] All', totalChunks, 'chunks sent successfully');
 }
 
 // Start streaming audio from the TTS server
@@ -443,7 +458,7 @@ async function startStreamingAudio(text, settings) {
     }
 
     // Send audio to offscreen document and set playback rate
-    sendAudioChunks(audioBytes, mimeType);
+    await sendAudioChunks(audioBytes, mimeType);
     chrome.runtime.sendMessage({
       type: 'setRate',
       rate: parseFloat(settings.speed)

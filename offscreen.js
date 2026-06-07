@@ -18,26 +18,30 @@ function initAudio() {
 function processAudioData(audioDataArray, mimeType) {
   try {
     initAudio();
-    
+    console.log('[OFFSCREEN] processAudioData: input array length', audioDataArray.length, 'mimeType:', mimeType);
+
     // Convert array back to Uint8Array
     const uint8Array = new Uint8Array(audioDataArray);
-    
+    console.log('[OFFSCREEN] Uint8Array created, length:', uint8Array.length);
+
     // Create blob from the array
     const blob = new Blob([uint8Array], { type: mimeType });
-    
+    console.log('[OFFSCREEN] Blob created, size:', blob.size, 'type:', blob.type);
+
     // Create URL for the blob
     const audioUrl = URL.createObjectURL(blob);
-    
+    console.log('[OFFSCREEN] Object URL created');
+
     // Play the audio
     playAudioUrl(audioUrl);
-    
+
     // Notify that audio is ready to play
     chrome.runtime.sendMessage({ type: 'audioReady' });
   } catch (error) {
-    console.error('Error processing audio data:', error);
-    chrome.runtime.sendMessage({ 
-      type: 'streamError', 
-      error: error.message 
+    console.error('[OFFSCREEN] Error processing audio data:', error);
+    chrome.runtime.sendMessage({
+      type: 'streamError',
+      error: error.message
     });
   }
 }
@@ -142,16 +146,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Offscreen received message:', message.type);
   
   switch (message.type) {
-    case 'audioChunk':
+    case 'clearChunks':
+      audioChunks = [];
+      console.log('[OFFSCREEN] Chunks cleared');
+      break;
+    case 'audioChunk': {
       // Store chunk at its index
-      audioChunks[message.index] = message.chunk;
+      const chunk = message.chunk;
+      console.log('[OFFSCREEN] Chunk', message.index, 'received, length:', chunk ? chunk.length : 'null', 'isLast:', message.isLast);
+      audioChunks[message.index] = chunk;
       if (message.isLast) {
-        // Combine all chunks — use concatAll to avoid V8 argument limit
-        const combined = concatAll(audioChunks);
-        processAudioData(combined, message.mimeType);
+        const expected = audioChunks.length;
+        const holes = audioChunks.filter(c => c === undefined).length;
+        console.log('[OFFSCREEN] Last chunk. Total slots:', expected, 'Holes:', holes);
+        try {
+          const combined = concatAll(audioChunks);
+          console.log('[OFFSCREEN] Combined array length:', combined.length);
+          processAudioData(combined, message.mimeType);
+        } catch (err) {
+          console.error('[OFFSCREEN] Failed to combine chunks:', err);
+          chrome.runtime.sendMessage({ type: 'streamError', error: err.message });
+        }
         audioChunks = [];
       }
       break;
+    }
     case 'processAudioData':
       if (message.audioData) {
         processAudioData(message.audioData, message.mimeType);
