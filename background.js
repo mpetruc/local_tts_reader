@@ -1,4 +1,4 @@
-const VERSION = 'ab8462a';
+const VERSION = 'edee4ba';
 let offscreenTabId = null;
 let offscreenResolve = null; // resolved when offscreen tab is created
 
