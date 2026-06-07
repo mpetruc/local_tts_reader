@@ -1,4 +1,4 @@
-const VERSION = '6f51f69';
+const VERSION = 'ab8462a';
 let offscreenTabId = null;
 let offscreenResolve = null; // resolved when offscreen tab is created
 
@@ -405,41 +405,6 @@ async function sendAudioChunks(audioBytes, mimeType) {
     }
   }
   console.log(`[BG]${VERSION} All`, totalChunks, 'chunks sent successfully');
-}
-  if (!offscreenTabId) {
-    throw new Error('No offscreen tab available');
-  }
-
-  // Tell offscreen to clear any previous state
-  await new Promise(resolve => {
-    chrome.tabs.sendMessage(offscreenTabId, { type: 'clearChunks' }, resolve);
-  });
-
-  for (let i = 0; i < totalChunks; i++) {
-    const start = i * CHUNK_SIZE;
-    const end = Math.min(start + CHUNK_SIZE, audioBytes.length);
-    const chunkArray = Array.from(audioBytes.slice(start, end));
-    try {
-      await new Promise((resolve, reject) => {
-        chrome.tabs.sendMessage(offscreenTabId, {
-          type: 'audioChunk',
-          chunk: chunkArray,
-          index: i,
-          isLast: i === totalChunks - 1,
-          mimeType: mimeType,
-          isRecording: isRecording
-        }, resp => {
-          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-          else resolve(resp);
-        });
-      });
-      console.log('[BG] Chunk', i, '/', totalChunks - 1, 'sent (', chunkArray.length, 'elements)');
-    } catch (err) {
-      console.error('[BG] Failed to send chunk', i, ':', err);
-      throw err;
-    }
-  }
-  console.log('[BG] All', totalChunks, 'chunks sent successfully');
 }
 
 // Start streaming audio from the TTS server
