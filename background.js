@@ -1,13 +1,20 @@
-let offscreenDocument = null;
+const VERSION = '6f51f69';
 let offscreenTabId = null;
-let isRecording = false;
-let currentPlayerState = 'stopped';
-let currentSentences = null;
-let currentHighlightTabId = null;
-let currentSentenceIndex = -1;
+let offscreenResolve = null; // resolved when offscreen tab is created
+
+// Listen for offscreen tab creation
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.url && tab.url.includes(chrome.runtime.id)) {
+    console.log(`[BG]${VERSION} Offscreen tab created: ${tab.id}`);
+    if (offscreenResolve) {
+      offscreenResolve(tab.id);
+      offscreenResolve = null;
+    }
+  }
+});
+
 // Create or get the offscreen document.
-// Reuse existing if available (it may be running stale code after reload,
-// but at least it works). Create new only if none exists.
+// Reuse existing if available. Create new only if none exists.
 async function setupOffscreenDocument() {
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT']
@@ -16,32 +23,34 @@ async function setupOffscreenDocument() {
   if (existingContexts.length > 0) {
     offscreenDocument = existingContexts[0];
     offscreenTabId = existingContexts[0].tab.id;
-    console.log('[BG] Reusing existing offscreen tab', offscreenTabId);
+    console.log(`[BG]${VERSION} Reusing existing offscreen tab ${offscreenTabId}`);
     return;
   }
+
+  // Create new offscreen and wait for tabs.onCreated to fire
+  const tabIdPromise = new Promise((resolve) => {
+    offscreenResolve = resolve;
+  });
 
   await chrome.offscreen.createDocument({
     url: 'offscreen.html',
     reasons: ['AUDIO_PLAYBACK'],
     justification: 'Playing TTS audio in the background'
   });
-  console.log('[BG] Offscreen document created');
+  console.log(`[BG]${VERSION} Offscreen document created`);
 
-  // Wait for the offscreen to load and get its tab ID
-  const MAX_RETRIES = 30;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const contexts = await chrome.runtime.getContexts({
-      contextTypes: ['OFFSCREEN_DOCUMENT']
-    });
-    if (contexts.length > 0 && contexts[0].tab && contexts[0].tab.id) {
-      offscreenTabId = contexts[0].tab.id;
-      offscreenDocument = contexts[0];
-      console.log('[BG] Offscreen tab ID:', offscreenTabId);
-      return;
-    }
-    await new Promise(r => setTimeout(r, 100));
+  // Wait for the tab ID (with timeout)
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('Offscreen tab timeout')), 5000)
+  );
+
+  try {
+    offscreenTabId = await Promise.race([tabIdPromise, timeout]);
+    offscreenDocument = null; // will be set from getContexts if needed
+    console.log(`[BG]${VERSION} Offscreen tab ID: ${offscreenTabId}`);
+  } catch (err) {
+    console.warn(`[BG]${VERSION} Offscreen tab not found:`, err.message);
   }
-  console.warn('[BG] Offscreen tab ID not found after', MAX_RETRIES, 'attempts');
 }
 // Set up context menu items
 function setupContextMenu() {
@@ -360,8 +369,43 @@ function uint8ArrayToBase64(bytes) {
 async function sendAudioChunks(audioBytes, mimeType) {
   const CHUNK_SIZE = 256 * 1024; // 256 KB
   const totalChunks = Math.ceil(audioBytes.length / CHUNK_SIZE);
-  console.log('[BG] Sending', totalChunks, 'audio chunks (', audioBytes.length, 'bytes total)');
+  console.log(`[BG]${VERSION} Sending`, totalChunks, 'audio chunks (', audioBytes.length, 'bytes total)');
 
+  if (!offscreenTabId) {
+    throw new Error('No offscreen tab available');
+  }
+
+  // Tell offscreen to clear any previous state
+  await new Promise(resolve => {
+    chrome.tabs.sendMessage(offscreenTabId, { type: 'clearChunks' }, resolve);
+  });
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, audioBytes.length);
+    const chunkArray = Array.from(audioBytes.slice(start, end));
+    try {
+      await new Promise((resolve, reject) => {
+        chrome.tabs.sendMessage(offscreenTabId, {
+          type: 'audioChunk',
+          chunk: chunkArray,
+          index: i,
+          isLast: i === totalChunks - 1,
+          mimeType: mimeType,
+          isRecording: isRecording
+        }, resp => {
+          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+          else resolve(resp);
+        });
+      });
+      console.log(`[BG]${VERSION} Chunk`, i, '/', totalChunks - 1, 'sent (', chunkArray.length, 'elements)');
+    } catch (err) {
+      console.error(`[BG]${VERSION} Failed to send chunk`, i, ':', err);
+      throw err;
+    }
+  }
+  console.log(`[BG]${VERSION} All`, totalChunks, 'chunks sent successfully');
+}
   if (!offscreenTabId) {
     throw new Error('No offscreen tab available');
   }
