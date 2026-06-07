@@ -6,6 +6,20 @@ let currentHighlightTabId = null;
 let currentSentenceIndex = -1;
 
 // Create or get the offscreen document
+// Helper: try to ping offscreen to verify it is alive
+async function pingOffscreen() {
+  try {
+    const resp = await Promise.race([
+      chrome.runtime.sendMessage({ type: 'ping' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('ping timeout')), 2000))
+    ]);
+    return resp && resp.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+// Create or get the offscreen document
 async function setupOffscreenDocument() {
   // Check if we already have an offscreen document
   const existingContexts = await chrome.runtime.getContexts({
@@ -13,8 +27,14 @@ async function setupOffscreenDocument() {
   });
 
   if (existingContexts.length > 0) {
-    offscreenDocument = existingContexts[0];
-    return;
+    // Verify it is actually alive (getContexts can return stale contexts)
+    const alive = await pingOffscreen();
+    if (alive) {
+      offscreenDocument = existingContexts[0];
+      console.log('[BG] Reusing existing offscreen document');
+      return;
+    }
+    console.log('[BG] Existing offscreen is dead — recreating');
   }
 
   // Create an offscreen document
@@ -23,6 +43,16 @@ async function setupOffscreenDocument() {
     reasons: ['AUDIO_PLAYBACK'],
     justification: 'Playing TTS audio in the background'
   });
+
+  // Wait until the new document registers its message listener
+  for (let i = 0; i < 30; i++) {
+    if (await pingOffscreen()) {
+      console.log('[BG] Offscreen document created and ready');
+      return;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  console.warn('[BG] Offscreen document created but did not respond to ping');
 }
 
 // Set up context menu items
@@ -331,20 +361,14 @@ async function sendAudioChunks(audioBytes, mimeType) {
   const totalChunks = Math.ceil(audioBytes.length / CHUNK_SIZE);
   console.log('[BG] Sending', totalChunks, 'audio chunks (', audioBytes.length, 'bytes total)');
 
-  // Wait for offscreen to be ready (poll ping until we get a response)
-  const MAX_RETRIES = 30;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    try {
-      const resp = await chrome.runtime.sendMessage({ type: 'ping' });
-      if (resp && resp.ok) {
-        console.log('[BG] Offscreen is ready');
-        break;
-      }
-    } catch (err) {
-      console.log('[BG] Offscreen not ready yet:', err.message);
-    }
-    await new Promise(r => setTimeout(r, 100));
+  // Verify offscreen is alive; it may have been killed during a long fetch
+  let alive = await pingOffscreen();
+  if (!alive) {
+    console.log('[BG] Offscreen gone — recreating before send');
+    await setupOffscreenDocument();
+    alive = true; // setupOffscreenDocument waits for ping to succeed
   }
+  console.log('[BG] Offscreen is ready');
 
   // Tell offscreen to clear any previous state
   chrome.runtime.sendMessage({ type: 'clearChunks' });
