@@ -169,6 +169,11 @@ function initStreamingAudio() {
       if (totalBytes > streamBlobBytes && !streamComplete) {
         sendDiagnostic('onended — more data available (' + totalBytes + ' > ' + streamBlobBytes + ') — continuing');
         swapStreamingBlob();
+        // swapStreamingBlob won't call play() because streamAudio.paused is true on onended
+        // So we must resume playback explicitly
+        streamSwappingSrc = true;
+        streamAudio.play().catch(() => {});
+        setTimeout(() => { streamSwappingSrc = false; }, 0);
         return;
       }
       streamIsPlaying = false;
@@ -211,7 +216,11 @@ function concatStreamChunks() {
 
 // Check if we need to swap the blob (playback head near buffer edge).
 function needsSwap() {
-  if (!streamAudio || !streamBlobUrl) return true; // first swap
+  if (!streamAudio || !streamBlobUrl) {
+    // First swap: only create blob when enough data is buffered
+    const totalBytes = streamChunks.reduce((s, c) => s + c.length, 0);
+    return (totalBytes / 2 / SAMPLE_RATE) >= START_THRESHOLD;
+  }
   // Debounce: don't swap too frequently
   if (Date.now() - streamLastSwapTime < SWAP_MIN_INTERVAL) return false;
   // Only swap if there's actually new data to add
@@ -233,21 +242,21 @@ function swapStreamingBlob() {
   const currentTime = streamAudio.currentTime;
   const wasPlaying = streamIsPlaying && !streamIsPaused && !streamAudio.paused;
 
-  // Revoke old blob URL to free memory
-  if (streamBlobUrl) {
-    URL.revokeObjectURL(streamBlobUrl);
-    streamBlobUrl = null;
-  }
-
-  // Concat all accumulated chunks into WAV
+  // Set new src BEFORE revoking old blob to avoid spurious events
   const pcm = concatStreamChunks();
-  streamBlobUrl = URL.createObjectURL(pcmToWavBlob(pcm));
+  const newBlobUrl = URL.createObjectURL(pcmToWavBlob(pcm));
   streamBlobDuration = pcm.length / 2 / SAMPLE_RATE;
   streamBlobBytes = pcm.length;
 
-  streamAudio.src = streamBlobUrl;
+  streamAudio.src = newBlobUrl;
   streamAudio.currentTime = currentTime;
   streamAudio.playbackRate = streamPlaybackRate;
+
+  // Now safe to revoke old blob
+  if (streamBlobUrl) {
+    URL.revokeObjectURL(streamBlobUrl);
+  }
+  streamBlobUrl = newBlobUrl;
 
   if (wasPlaying) {
     streamSwappingSrc = true;
