@@ -419,7 +419,7 @@ async function sendAudioChunks(audioBytes, mimeType, rate = 1) {
 // Each chunk is at most `maxChars` characters (default 400), split at
 // sentence boundaries (., !, ?) to preserve speech coherence.
 function splitTextIntoChunks(text, maxChars) {
-  maxChars = maxChars || DEFAULT_SETTINGS.streamChunkMaxChars;
+  maxChars = maxChars || 400; // default: 400 chars per chunk
   // Extract sentences (text ending with sentence punctuation)
   const sentences = text.match(/[^.!?]*[.!?]["')\\]*\\s*/g);
   if (!sentences) {
