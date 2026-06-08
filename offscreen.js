@@ -33,6 +33,7 @@ let audioOffset = 0;           // playback offset (frames) within audioBuffer
 let isStreamingPlaying = false;
 let isStreamingPaused = false;
 let streamDuration = 0;        // total duration of streamed audio so far
+let streamPlaybackRate = 1;    // playback rate for streaming mode
 let timeUpdateInterval = null;
 const SAMPLE_RATE = 24000;     // TTS server sample rate
 
@@ -153,9 +154,7 @@ function initStreamingAudio(rate) {
   }
 
   audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-  if (rate && !isNaN(rate) && rate > 0) {
-    audioCtx.playbackRate = rate;
-  }
+  streamPlaybackRate = rate && !isNaN(rate) && rate > 0 ? rate : 1;
   audioBuffer = null;
   bufferLength = 0;
   bufferCapacity = 0;
@@ -170,8 +169,20 @@ function initStreamingAudio(rate) {
 // Append a raw PCM chunk (16-bit, little-endian, mono) to the streaming buffer.
 // The buffer is grown as needed.
 function appendStreamingChunk(chunkArray) {
-  const pcmBytes = new Uint8Array(chunkArray);
-  const newFrames = pcmBytes.length / 2; // 2 bytes per sample (16-bit)
+  let pcmBytes = new Uint8Array(chunkArray);
+  // Handle odd-length chunks: stream reader may split mid-sample.
+  // Buffer the stray byte and prepend it to the next chunk.
+  if (typeof appendStreamingChunk._leftover !== 'undefined') {
+    const combined = new Uint8Array(pcmBytes.length + 1);
+    combined[0] = appendStreamingChunk._leftover;
+    combined.set(pcmBytes, 1);
+    pcmBytes = combined;
+    appendStreamingChunk._leftover = undefined;
+  }
+  const newFrames = Math.floor(pcmBytes.length / 2); // 2 bytes per sample (16-bit)
+  if (pcmBytes.length % 2 === 1) {
+    appendStreamingChunk._leftover = pcmBytes[pcmBytes.length - 1];
+  }
 
   // Grow buffer if needed (double capacity each time)
   if (!audioBuffer || bufferLength + newFrames > bufferCapacity) {
@@ -182,15 +193,19 @@ function appendStreamingChunk(chunkArray) {
     const oldBuffer = audioBuffer;
     audioBuffer = audioCtx.createBuffer(1, newCapacity, SAMPLE_RATE);
     if (oldBuffer) {
-      oldBuffer.copyToChannel(audioBuffer.getChannelData(0), 0, 0, bufferLength);
+      audioBuffer.getChannelData(0).set(oldBuffer.getChannelData(0).slice(0, bufferLength));
     }
     bufferCapacity = newCapacity;
   }
 
   const channelData = audioBuffer.getChannelData(0);
-  const int16View = new Int16Array(pcmBytes.buffer);
+  // Decode 16-bit little-endian PCM byte-by-byte (avoids Int16Array alignment issues)
   for (let i = 0; i < newFrames; i++) {
-    channelData[bufferLength + i] = int16View[i] / 32768; // normalise to [-1, 1]
+    const lo = pcmBytes[i * 2];
+    const hi = pcmBytes[i * 2 + 1];
+    let sample = lo | (hi << 8); // little-endian
+    if (sample >= 32768) sample -= 65536; // sign-extend
+    channelData[bufferLength + i] = sample / 32768;
   }
   bufferLength += newFrames;
   streamDuration = bufferLength / SAMPLE_RATE;
@@ -211,7 +226,7 @@ function playStreaming() {
   // Use the full buffer but start at the offset
   sourceNode.buffer = audioBuffer;
   sourceNode.connect(audioCtx.destination);
-
+  sourceNode.playbackRate.value = streamPlaybackRate;
   sourceNode.onended = () => {
     // Only transition to stopped if we've played all buffered audio
     // and no new chunks are expected (source ended naturally)
@@ -460,15 +475,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'setRate':
-      if (audioCtx) {
+      {
         const rate = parseFloat(message.rate);
         if (!isNaN(rate) && rate > 0) {
-          audioCtx.playbackRate = rate;
-        }
-      } else if (audioElement) {
-        const rate = parseFloat(message.rate);
-        if (!isNaN(rate) && rate > 0) {
-          audioElement.playbackRate = rate;
+          if (audioCtx) {
+            streamPlaybackRate = rate;
+            if (sourceNode) sourceNode.playbackRate.value = rate;
+          } else if (audioElement) {
+            audioElement.playbackRate = rate;
+          }
         }
       }
       break;

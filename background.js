@@ -304,6 +304,8 @@ case 'startStreaming':
       }
       currentPlayerState = 'stopped';
       chrome.runtime.sendMessage({ type: 'playerStateUpdate', state: 'stopped' });
+      // Forward stop to offscreen to halt playback
+      chrome.runtime.sendMessage({ type: 'stop' });
       // Clear highlights when stopped
       if (currentHighlightTabId) {
         chrome.tabs.sendMessage(currentHighlightTabId, { type: 'clearHighlight' }).catch(() => {});
