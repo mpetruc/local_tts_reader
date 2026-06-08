@@ -478,7 +478,7 @@ async function startStreamingAudioStream(text, settings) {
           input: chunks[i],
           stream: true,
           response_format: 'pcm',
-          speed: rate
+          speed: 1  // Server generates at 1x; client handles speed via playbackRate
         }),
         signal: abortController ? abortController.signal : undefined
       });

@@ -1,4 +1,4 @@
-// Batched concat to avoid V8's ~655K argument limit
+// ── Batched concat to avoid V8's ~655K argument limit ──
 function concatAll(chunks) {
   const BATCH = 65536;
   let totalLen = 0;
@@ -22,30 +22,25 @@ let audioElement = null;
 let isPlaying = false;
 let audioChunks = [];
 
-// ── Streaming state ──
-let audioCtx = null;
-let audioBuffer = null;        // AudioBuffer that grows as chunks arrive
-let bufferLength = 0;          // number of frames written into audioBuffer
-let bufferCapacity = 0;        // total capacity of audioBuffer
-let sourceNode = null;         // current AudioBufferSourceNode
-let audioStartTime = 0;        // audioCtx.currentTime when playback started
-let audioOffset = 0;           // playback offset (frames) within audioBuffer
-let isStreamingPlaying = false;
-let isStreamingPaused = false;
-let streamDuration = 0;        // total duration of streamed audio so far
-let streamPlaybackRate = 1;    // playback rate for streaming mode
-let timeUpdateInterval = null;
-const SAMPLE_RATE = 24000;     // TTS server sample rate
+// ── Streaming state (audioElement-based, preserves pitch) ──
+let streamAudio = null;           // <audio> element for streaming
+let streamPcm = null;             // Uint8Array accumulator (raw 16-bit LE PCM)
+let streamBlobUrl = null;         // current blob URL
+let streamIsPlaying = false;      // user-intended playing state
+let streamIsPaused = false;       // user-intended paused state
+let streamComplete = false;       // all chunks received
+let streamPlaybackRate = 1;       // requested playback rate
+let streamSwappingSrc = false;    // guard against spurious pause events during src swap
+const SAMPLE_RATE = 24000;        // TTS server sample rate
 
-
-// Send diagnostic info to background console (offscreen logs are in separate DevTools)
+// Send diagnostic info to background console
 function sendDiagnostic(msg) {
   console.log('[OFFSCREEN]', msg);
   chrome.runtime.sendMessage({ type: 'streamingDiagnostic', msg });
 }
+
 // ── Non-streaming helpers ──
 
-// Ensure the audio element exists
 function initAudio() {
   if (!audioElement) {
     audioElement = document.getElementById('audioElement');
@@ -57,294 +52,205 @@ function initAudio() {
   }
 }
 
-// Process audio data received from background script
 function processAudioData(audioDataArray, mimeType, rate) {
   try {
     initAudio();
-
-    // Convert array back to Uint8Array
     const uint8Array = new Uint8Array(audioDataArray);
-
-    // Create blob from the array
     const blob = new Blob([uint8Array], { type: mimeType });
-
-    // Create URL for the blob
     const audioUrl = URL.createObjectURL(blob);
-
-    // Play the audio
     playAudioUrl(audioUrl, rate);
-
-    // Notify that audio is ready to play
     chrome.runtime.sendMessage({ type: 'audioReady' });
   } catch (error) {
     console.error('Error processing audio data:', error);
-    chrome.runtime.sendMessage({
-      type: 'streamError',
-      error: error.message
-    });
+    chrome.runtime.sendMessage({ type: 'streamError', error: error.message });
   }
 }
 
-// Play audio from URL
 function playAudioUrl(audioUrl, rate) {
   try {
     console.log('[OFFSCREEN] Playing audio URL:', audioUrl);
-
-    // Set up audio element
     audioElement.src = audioUrl;
-
-    // Apply playback rate AFTER src is set (setting src can reset playbackRate)
     if (rate && !isNaN(rate) && rate > 0) {
       audioElement.playbackRate = rate;
       console.log('[OFFSCREEN] Playback rate set to:', rate);
     }
-
-    // Set up event listeners
     audioElement.onplay = () => {
       isPlaying = true;
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'playing' });
     };
-
     audioElement.onpause = () => {
       isPlaying = false;
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'paused' });
     };
-
     audioElement.onended = () => {
       isPlaying = false;
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'stopped' });
       chrome.runtime.sendMessage({ type: 'streamComplete' });
     };
-
-    // Add timeupdate event for seeking
     audioElement.ontimeupdate = () => {
       chrome.runtime.sendMessage({
         type: 'timeUpdate',
-        timeInfo: {
-          currentTime: audioElement.currentTime,
-          duration: audioElement.duration
-        }
+        timeInfo: { currentTime: audioElement.currentTime, duration: audioElement.duration }
       });
     };
-
-    // Start playing
     audioElement.play().catch(err => {
       console.error('Play error:', err);
-      chrome.runtime.sendMessage({
-        type: 'streamError',
-        error: err.message
-      });
+      chrome.runtime.sendMessage({ type: 'streamError', error: err.message });
     });
   } catch (error) {
     console.error('Error playing audio:', error);
-    chrome.runtime.sendMessage({
-      type: 'streamError',
-      error: error.message
-    });
+    chrome.runtime.sendMessage({ type: 'streamError', error: error.message });
   }
 }
 
-// ── Streaming helpers ──
+// ── Streaming helpers (audioElement + WAV blob) ──
 
-// Initialise (or reset) the streaming AudioContext and buffer.
-// Returns the playback rate applied.
-function initStreamingAudio(rate) {
-  // Close any previous context
-  if (audioCtx) {
-    try { audioCtx.close(); } catch {}
-    audioCtx = null;
-  }
-  if (timeUpdateInterval) {
-    clearInterval(timeUpdateInterval);
-    timeUpdateInterval = null;
-  }
-
-  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-  streamPlaybackRate = rate && !isNaN(rate) && rate > 0 ? rate : 1;
-  audioBuffer = null;
-  bufferLength = 0;
-  bufferCapacity = 0;
-  sourceNode = null;
-  audioStartTime = 0;
-  audioOffset = 0;
-  isStreamingPlaying = false;
-  isStreamingPaused = false;
-  streamDuration = 0;
+// Wrap raw 16-bit LE mono PCM bytes in a minimal RIFF WAV container.
+function pcmToWavBlob(pcmBytes) {
+  const dataLen = pcmBytes.length;
+  const buf = new ArrayBuffer(44 + dataLen);
+  const v = new DataView(buf);
+  let o = 0;
+  // RIFF header
+  v.setUint32(o, 0x52494646, false); o += 4; // "RIFF"
+  v.setUint32(o, 36 + dataLen, true); o += 4; // file size - 8
+  v.setUint32(o, 0x57415645, false); o += 4; // "WAVE"
+  // fmt chunk
+  v.setUint32(o, 0x666d7420, false); o += 4; // "fmt "
+  v.setUint32(o, 16, true); o += 4;          // chunk size
+  v.setUint16(o, 1, true); o += 2;           // PCM
+  v.setUint16(o, 1, true); o += 2;           // mono
+  v.setUint32(o, SAMPLE_RATE, true); o += 4; // sample rate
+  v.setUint32(o, SAMPLE_RATE * 2, true); o += 4; // byte rate
+  v.setUint16(o, 2, true); o += 2;           // block align
+  v.setUint16(o, 16, true); o += 2;          // bits per sample
+  // data chunk
+  v.setUint32(o, 0x64617461, false); o += 4; // "data"
+  v.setUint32(o, dataLen, true); o += 4;     // data size
+  new Uint8Array(buf, o).set(pcmBytes);
+  return new Blob([buf], { type: 'audio/wav' });
 }
 
-// Append a raw PCM chunk (16-bit, little-endian, mono) to the streaming buffer.
-// The buffer is grown as needed.
-function appendStreamingChunk(chunkArray) {
-  let pcmBytes = new Uint8Array(chunkArray);
-  // Handle odd-length chunks: stream reader may split mid-sample.
-  // Buffer the stray byte and prepend it to the next chunk.
-  if (typeof appendStreamingChunk._leftover !== 'undefined') {
-    const combined = new Uint8Array(pcmBytes.length + 1);
-    combined[0] = appendStreamingChunk._leftover;
-    combined.set(pcmBytes, 1);
-    pcmBytes = combined;
-    appendStreamingChunk._leftover = undefined;
-  }
-  const newFrames = Math.floor(pcmBytes.length / 2); // 2 bytes per sample (16-bit)
-  if (pcmBytes.length % 2 === 1) {
-    appendStreamingChunk._leftover = pcmBytes[pcmBytes.length - 1];
-  }
+// Ensure the streaming audio element exists.
+function initStreamingAudio() {
+  if (!streamAudio) {
+    streamAudio = document.createElement('audio');
+    streamAudio.id = 'streamAudio';
+    document.body.appendChild(streamAudio);
 
-  // Grow buffer if needed (double capacity each time)
-  if (!audioBuffer || bufferLength + newFrames > bufferCapacity) {
-    const newCapacity = Math.max(
-      bufferCapacity * 2 || newFrames * 4, // start with 4x headroom
-      bufferLength + newFrames
-    );
-    const oldBuffer = audioBuffer;
-    audioBuffer = audioCtx.createBuffer(1, newCapacity, SAMPLE_RATE);
-    if (oldBuffer) {
-      audioBuffer.getChannelData(0).set(oldBuffer.getChannelData(0).slice(0, bufferLength));
-    }
-    bufferCapacity = newCapacity;
-  }
+    streamAudio.onplay = () => {
+      if (streamSwappingSrc) return;
+      streamIsPlaying = true;
+      streamIsPaused = false;
+      chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'playing' });
+    };
 
-  const channelData = audioBuffer.getChannelData(0);
-  // Decode 16-bit little-endian PCM byte-by-byte (avoids Int16Array alignment issues)
-  for (let i = 0; i < newFrames; i++) {
-    const lo = pcmBytes[i * 2];
-    const hi = pcmBytes[i * 2 + 1];
-    let sample = lo | (hi << 8); // little-endian
-    if (sample >= 32768) sample -= 65536; // sign-extend
-    channelData[bufferLength + i] = sample / 32768;
-  }
-  bufferLength += newFrames;
-  streamDuration = bufferLength / SAMPLE_RATE;
-}
+    streamAudio.onpause = () => {
+      if (streamSwappingSrc) return;
+      // Don't override state if we're still supposed to be playing
+      // (browser may pause briefly during buffer operations)
+      if (!streamIsPlaying) return;
+      streamIsPlaying = false;
+      streamIsPaused = true;
+      chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'paused' });
+    };
 
-// Start (or resume) streaming playback from the current offset.
-async function playStreaming() {
-  if (!audioBuffer || bufferLength === 0) return;
-
-  // If we already have a source playing, don't create a new one
-  if (sourceNode && isStreamingPlaying && !isStreamingPaused) return;
-
-  const remainingFrames = bufferLength - audioOffset;
-  if (remainingFrames <= 0) return;
-
-  // Create a new source for the remaining audio
-  sourceNode = audioCtx.createBufferSource();
-  // Use the full buffer but start at the offset
-  sourceNode.buffer = audioBuffer;
-  sourceNode.connect(audioCtx.destination);
-  // Server handles speed — client always plays at rate 1
-  console.log('[OFFSCREEN] playStreaming: offset=', audioOffset, 'bufferLen=', bufferLength);
-  sourceNode.onended = () => {
-    // Calculate how far we actually played and advance audioOffset
-    const elapsedFrames = Math.floor((audioCtx.currentTime - audioStartTime) * SAMPLE_RATE);
-    audioOffset = Math.min(audioOffset + elapsedFrames, bufferLength);
-    sendDiagnostic('sourceNode.onended fired, elapsedFrames=' + elapsedFrames + ' newOffset=' + audioOffset + ' bufferLen=' + bufferLength);
-    if (audioOffset >= bufferLength) {
-      isStreamingPlaying = false;
-      isStreamingPaused = false;
-      sourceNode = null;
-      if (timeUpdateInterval) {
-        clearInterval(timeUpdateInterval);
-        timeUpdateInterval = null;
-      }
-      sendDiagnostic('Playback stopped (all audio consumed)');
+    streamAudio.onended = () => {
+      streamIsPlaying = false;
+      streamIsPaused = false;
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'stopped' });
-    } else {
-      // Buffer grew while playing — restart immediately from new offset
-      sendDiagnostic('source ended but buffer still growing, restarting from offset ' + audioOffset);
-      sourceNode = null;
-      isStreamingPlaying = false;
-      playStreaming().catch(console.error);
-    }
-    // If buffer grew (more chunks arrived), the message handler will restart playback
-  };
+    };
 
-  const offsetSeconds = audioOffset / SAMPLE_RATE;
-  sendDiagnostic('playStreaming: ctx state before resume: ' + audioCtx.state);
-  // Resume AudioContext (may be suspended in offscreen documents)
-  await audioCtx.resume();
-  sendDiagnostic('playStreaming: ctx state after resume: ' + audioCtx.state);
-  // Only play the valid portion (bufferLength), not the full capacity
-  const duration = (bufferLength - audioOffset) / SAMPLE_RATE;
-  sourceNode.start(0, offsetSeconds, duration);
-  sendDiagnostic('sourceNode.start() called at offset ' + offsetSeconds + 's, duration=' + duration.toFixed(2) + 's, bufferLen=' + bufferLength);
-  audioStartTime = audioCtx.currentTime - offsetSeconds;
-  isStreamingPlaying = true;
-  isStreamingPaused = false;
-
-  chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'playing' });
-
-  // Start time update interval
-  if (timeUpdateInterval) clearInterval(timeUpdateInterval);
-  timeUpdateInterval = setInterval(() => {
-    if (!isStreamingPlaying || isStreamingPaused) return;
-    const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
-    const currentFrame = Math.min(audioOffset + elapsed, bufferLength);
-    const currentTime = currentFrame / SAMPLE_RATE;
-    chrome.runtime.sendMessage({
-      type: 'timeUpdate',
-      timeInfo: {
-        currentTime: currentTime,
-        duration: 0 // unknown until stream completes
+    streamAudio.onstalled = () => {
+      // Resume if the browser paused due to buffering but we want to play
+      if (streamIsPlaying && streamAudio.paused && !streamSwappingSrc) {
+        streamAudio.play().catch(() => {});
       }
-    });
-  }, 250);
+    };
+  }
+}
+
+// Append a raw PCM chunk (16-bit LE mono, array of bytes) to streamPcm.
+function appendStreamingChunk(chunkArray) {
+  const chunk = new Uint8Array(chunkArray);
+  const newPcm = new Uint8Array(streamPcm.length + chunk.length);
+  newPcm.set(streamPcm);
+  newPcm.set(chunk, streamPcm.length);
+  streamPcm = newPcm;
+}
+
+// Create a new WAV blob URL and swap it into the streaming audio element.
+// Preserves playback position, rate, and play/pause state.
+function swapStreamingBlob() {
+  initStreamingAudio();
+
+  const currentTime = streamAudio.currentTime;
+  const wasPlaying = streamIsPlaying && !streamIsPaused && !streamAudio.paused;
+
+  // Swap source
+  streamBlobUrl = URL.createObjectURL(pcmToWavBlob(streamPcm));
+  streamAudio.src = streamBlobUrl;
+  streamAudio.currentTime = currentTime;
+  streamAudio.playbackRate = streamPlaybackRate;
+
+  if (wasPlaying) {
+    streamSwappingSrc = true;
+    streamAudio.play().catch(() => {});
+    // Clear guard after a tick — events from the swap are synchronous
+    setTimeout(() => { streamSwappingSrc = false; }, 0);
+  }
+}
+
+// Start streaming playback.
+function playStreaming() {
+  initStreamingAudio();
+  if (!streamBlobUrl) return;
+  streamIsPlaying = true;
+  streamIsPaused = false;
+  streamAudio.playbackRate = streamPlaybackRate;
+  streamSwappingSrc = true;
+  streamAudio.play().catch(() => {});
+  setTimeout(() => { streamSwappingSrc = false; }, 0);
 }
 
 // Pause streaming playback.
 function pauseStreaming() {
-  if (!isStreamingPlaying || isStreamingPaused) return;
-
-  // Save current playback position
-  const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
-  audioOffset = Math.min(audioOffset + elapsed, bufferLength);
-
-  // Stop the current source
-  if (sourceNode) {
-    try { sourceNode.stop(); } catch {}
-    sourceNode.disconnect();
-    sourceNode = null;
-  }
-
-  isStreamingPaused = true;
-  if (timeUpdateInterval) {
-    clearInterval(timeUpdateInterval);
-    timeUpdateInterval = null;
-  }
+  initStreamingAudio();
+  if (!streamIsPlaying) return;
+  streamIsPlaying = false;
+  streamIsPaused = true;
+  streamAudio.pause();
   chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'paused' });
 }
 
 // Stop streaming playback completely.
 function stopStreaming() {
-  if (sourceNode) {
-    try { sourceNode.stop(); } catch {}
-    sourceNode.disconnect();
-    sourceNode = null;
+  initStreamingAudio();
+  streamIsPlaying = false;
+  streamIsPaused = false;
+  streamComplete = false;
+  streamAudio.pause();
+  streamAudio.src = '';
+  streamAudio.currentTime = 0;
+  if (streamBlobUrl) {
+    URL.revokeObjectURL(streamBlobUrl);
+    streamBlobUrl = null;
   }
-  if (timeUpdateInterval) {
-    clearInterval(timeUpdateInterval);
-    timeUpdateInterval = null;
-  }
-  if (audioCtx) {
-    try { audioCtx.close(); } catch {}
-    audioCtx = null;
-  }
-  audioBuffer = null;
-  bufferLength = 0;
-  bufferCapacity = 0;
-  audioOffset = 0;
-  audioStartTime = 0;
-  isStreamingPlaying = false;
-  isStreamingPaused = false;
-  streamDuration = 0;
+  streamPcm = null;
+  streamPlaybackRate = 1;
+}
+
+// Reset streaming state before a new session.
+function resetStreaming() {
+  sendDiagnostic('Resetting streaming state');
+  stopStreaming();
 }
 
 // ── Shared helpers ──
 
-// Get current player state
 function getPlayerState() {
-  if (isStreamingPlaying) {
-    return isStreamingPaused ? 'paused' : 'playing';
+  if (streamIsPlaying || (streamPcm && streamAudio && streamAudio.src)) {
+    return streamIsPaused ? 'paused' : (streamIsPlaying ? 'playing' : 'stopped');
   }
   if (!audioElement) return 'stopped';
   if (audioElement.paused) {
@@ -353,17 +259,11 @@ function getPlayerState() {
   return 'playing';
 }
 
-// Get current time and duration
 function getTimeInfo() {
-  if (isStreamingPlaying || (audioCtx && bufferLength > 0)) {
-    let currentFrame = audioOffset;
-    if (isStreamingPlaying && !isStreamingPaused && audioCtx) {
-      const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
-      currentFrame = Math.min(audioOffset + elapsed, bufferLength);
-    }
+  if (streamPcm && streamAudio && streamAudio.src) {
     return {
-      currentTime: currentFrame / SAMPLE_RATE,
-      duration: streamDuration || 0
+      currentTime: streamAudio.currentTime,
+      duration: streamAudio.duration || 0
     };
   }
   if (!audioElement) return null;
@@ -373,20 +273,10 @@ function getTimeInfo() {
   };
 }
 
-// Seek to a specific time
 function seekTo(time) {
-  if (isStreamingPlaying) {
-    // Seek within buffered streaming audio
-    const targetFrame = Math.max(0, Math.min(time * SAMPLE_RATE, bufferLength));
-    audioOffset = targetFrame;
-    if (sourceNode) {
-      try { sourceNode.stop(); } catch {}
-      sourceNode.disconnect();
-      sourceNode = null;
-    }
-    if (isStreamingPlaying && !isStreamingPaused) {
-      playStreaming();
-    }
+  if (streamPcm && streamAudio && streamAudio.src) {
+    const maxTime = streamAudio.duration || 0;
+    streamAudio.currentTime = Math.max(0, Math.min(time, maxTime));
     return true;
   }
   if (!audioElement) return false;
@@ -401,7 +291,6 @@ function seekTo(time) {
 
 // ── Message handler ──
 
-// Handle messages from the background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Offscreen received message:', message.type);
 
@@ -415,10 +304,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'audioChunk':
-      // Store chunk at its index (non-streaming mode)
       audioChunks[message.index] = message.chunk;
       if (message.isLast) {
-        // Combine all chunks using batched concat
         const combined = concatAll(audioChunks);
         console.log('[OFFSCREEN] Combined array length:', combined.length);
         processAudioData(combined, message.mimeType, message.rate);
@@ -427,52 +314,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'resetStreaming':
-      // Clear all streaming state before a new session
-      sendDiagnostic('Resetting streaming state');
-      if (sourceNode) {
-        try { sourceNode.stop(); } catch {}
-        sourceNode = null;
-      }
-      if (timeUpdateInterval) {
-        clearInterval(timeUpdateInterval);
-        timeUpdateInterval = null;
-      }
-      if (audioCtx) {
-        try { audioCtx.close(); } catch {}
-        audioCtx = null;
-      }
-      audioBuffer = null;
-      bufferLength = 0;
-      bufferCapacity = 0;
-      audioOffset = 0;
-      audioStartTime = 0;
-      isStreamingPlaying = false;
-      isStreamingPaused = false;
-      streamDuration = 0;
-      streamPlaybackRate = 1;
+      resetStreaming();
       break;
 
     case 'streamingChunk':
-      // Real-time streaming PCM chunk — append and play immediately
       sendDiagnostic('streamingChunk received, size: ' + message.chunk.length + ' rate: ' + message.rate);
-      if (!audioCtx) {
-        initStreamingAudio(message.rate);
-        sendDiagnostic('AudioContext created, playbackRate: ' + streamPlaybackRate);
+      if (!streamPcm) {
+        initStreamingAudio();
+        streamPcm = new Uint8Array(0);
+        streamPlaybackRate = (message.rate && !isNaN(message.rate) && message.rate > 0) ? message.rate : 1;
+        sendDiagnostic('Streaming initialized, playbackRate: ' + streamPlaybackRate);
       }
       appendStreamingChunk(message.chunk);
-      sendDiagnostic('Buffer: frames=' + bufferLength + ' duration=' + (bufferLength / SAMPLE_RATE).toFixed(2) + 's');
-
-      // Start playing on first chunk if not already playing
-      if (!isStreamingPlaying && !isStreamingPaused) {
+      sendDiagnostic('Buffer: bytes=' + streamPcm.length + ' duration=' + (streamPcm.length / 2 / SAMPLE_RATE).toFixed(2) + 's');
+      swapStreamingBlob();
+      // Auto-play on first chunk
+      if (!streamIsPlaying && !streamIsPaused) {
         sendDiagnostic('Starting streaming playback');
-        playStreaming().catch(console.error);
-      } else if (isStreamingPaused) {
-        // If paused, don't auto-resume — wait for explicit play command
-      } else if (isStreamingPlaying && !sourceNode) {
-        // Source ended but more chunks arrived — restart playback from offset
-        sendDiagnostic('Restarting playback after source end');
-        playStreaming().catch(console.error);
+        playStreaming();
       }
+      break;
+
+    case 'streamComplete':
+      streamComplete = true;
+      sendDiagnostic('Stream complete, total duration=' + (streamPcm ? (streamPcm.length / 2 / SAMPLE_RATE).toFixed(2) : 'N/A') + 's');
       break;
 
     case 'processAudioData':
@@ -482,16 +347,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'offscreenReady':
-      // Respond to readiness check from background
       sendResponse({ ready: true });
       return true;
 
     case 'play':
-      if (isStreamingPlaying || (audioCtx && bufferLength > 0)) {
-        if (isStreamingPaused) {
-          playStreaming().catch(console.error); // resumes from saved offset
-        } else if (!isStreamingPlaying) {
-          playStreaming().catch(console.error); // start from beginning or saved offset
+      if (streamPcm && streamAudio && streamAudio.src) {
+        if (streamIsPaused || !streamIsPlaying) {
+          playStreaming();
         }
       } else if (audioElement) {
         audioElement.play();
@@ -499,7 +361,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'pause':
-      if (isStreamingPlaying && !isStreamingPaused) {
+      if (streamIsPlaying) {
         pauseStreaming();
       } else if (audioElement) {
         audioElement.pause();
@@ -507,7 +369,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'stop':
-      // Stop both streaming and legacy audio
       stopStreaming();
       if (audioElement) {
         audioElement.pause();
@@ -518,17 +379,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'seek':
-      const success = seekTo(message.time);
-      sendResponse({ success });
+      sendResponse({ success: seekTo(message.time) });
       return true;
 
     case 'setRate':
       {
         const rate = parseFloat(message.rate);
         if (!isNaN(rate) && rate > 0) {
-          if (audioCtx) {
+          if (streamAudio) {
             streamPlaybackRate = rate;
-            if (sourceNode) sourceNode.playbackRate.value = rate;
+            streamAudio.playbackRate = rate;
           } else if (audioElement) {
             audioElement.playbackRate = rate;
           }
@@ -549,10 +409,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Initialize when the document loads
 document.addEventListener('DOMContentLoaded', () => {
   console.log('Offscreen document loaded');
-
   audioElement = document.createElement('audio');
   audioElement.id = 'audioElement';
   document.body.appendChild(audioElement);
-
   console.log('Offscreen document initialized');
 });
