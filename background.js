@@ -184,8 +184,8 @@ case 'startStreaming':
   // Ensure offscreen ready and start streaming asynchronously
   (async () => {
     await startStreamingAudio(message.text, message.settings);
-    sendResponse({ success: true });
   })();
+  sendResponse({ success: true });
   return true;
       
     case 'controlAudio':
@@ -296,6 +296,26 @@ case 'startStreaming':
       }
       return true;
       
+
+    case 'pause':
+      // Pause audio playback but let backend keep processing
+      currentPlayerState = 'paused';
+      chrome.runtime.sendMessage({ type: 'playerStateUpdate', state: 'paused' });
+      chrome.runtime.sendMessage({ type: 'pause' });
+      return true;
+
+    case 'play':
+      // Resume audio playback
+      currentPlayerState = 'playing';
+      chrome.runtime.sendMessage({ type: 'playerStateUpdate', state: 'playing' });
+      chrome.runtime.sendMessage({ type: 'play' });
+      return true;
+
+    case 'setRate':
+      // Forward rate change to offscreen
+      chrome.runtime.sendMessage({ type: 'setRate', rate: message.rate });
+      return true;
+
     case 'stop':
       // Abort any in-flight streaming TTS request
       if (abortController) {
