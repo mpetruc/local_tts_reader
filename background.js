@@ -449,7 +449,9 @@ function splitTextIntoChunks(text, maxChars) {
 // and forwards PCM audio to the offscreen document as it arrives.
 async function startStreamingAudioStream(text, settings) {
   const chunks = splitTextIntoChunks(text, settings.streamChunkMaxChars);
+  console.log('[BG] Streaming: split text into', chunks.length, 'chunks');
   if (chunks.length === 0) {
+    console.log('[BG] Streaming: no chunks, stopping');
     chrome.runtime.sendMessage({ type: 'playerStateUpdate', state: 'stopped' });
     return;
   }
@@ -457,10 +459,11 @@ async function startStreamingAudioStream(text, settings) {
   const baseUrl = settings.serverUrl.replace(/\/v1\/audio\/speech\/?$/, '').replace(/\/*$/, '');
   const speechUrl = `${baseUrl}/v1/audio/speech`;
   const rate = parseFloat(settings.speed) || 1;
-
+  console.log('[BG] Streaming to:', speechUrl, 'rate:', rate);
   try {
     for (let i = 0; i < chunks.length; i++) {
       if (abortController && abortController.signal.aborted) break;
+      console.log('[BG] Streaming chunk', i + 1, '/', chunks.length, '(', chunks[i].length, 'chars)');
 
       const response = await fetch(speechUrl, {
         method: 'POST',
@@ -478,7 +481,7 @@ async function startStreamingAudioStream(text, settings) {
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-
+      console.log('[BG] Fetch OK (status', response.status + ')');
       // Read the PCM stream and forward to offscreen in chunks
       const reader = response.body.getReader();
       let streamOffset = 0;
@@ -500,9 +503,11 @@ async function startStreamingAudioStream(text, settings) {
             isLast: i === chunks.length - 1 && end >= value.length,
             rate: i === 0 ? rate : undefined
           });
+          console.log('[BG] Sent streamingChunk', streamOffset, 'bytes');
           streamOffset += end - pos;
         }
       }
+      console.log('[BG] Chunk', i, 'complete,', streamOffset, 'bytes total');
     }
 
     // Signal completion — if no chunks were sent, ensure state is set
@@ -534,9 +539,11 @@ async function startStreamingAudio(text, settings) {
     // Non-streaming waits for the full response — required when saving audio
     // or when sentence highlighting needs word-level timestamps.
     const useStreaming = !isRecording && !(settings.highlightSentences && settings.tabId);
+    console.log('[BG] useStreaming:', useStreaming, 'isRecording:', isRecording, 'highlight:', settings.highlightSentences);
 
     if (useStreaming) {
       // ── Real-time streaming mode ──
+      console.log('[BG] Starting real-time streaming');
       abortController = new AbortController();
       try {
         await startStreamingAudioStream(text, settings);

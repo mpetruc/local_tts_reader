@@ -212,7 +212,7 @@ function appendStreamingChunk(chunkArray) {
 }
 
 // Start (or resume) streaming playback from the current offset.
-function playStreaming() {
+async function playStreaming() {
   if (!audioBuffer || bufferLength === 0) return;
 
   // If we already have a source playing, don't create a new one
@@ -227,6 +227,7 @@ function playStreaming() {
   sourceNode.buffer = audioBuffer;
   sourceNode.connect(audioCtx.destination);
   sourceNode.playbackRate.value = streamPlaybackRate;
+  console.log('[OFFSCREEN] playStreaming: offset=', audioOffset, 'bufferLen=', bufferLength, 'rate=', streamPlaybackRate);
   sourceNode.onended = () => {
     // Only transition to stopped if we've played all buffered audio
     // and no new chunks are expected (source ended naturally)
@@ -244,6 +245,8 @@ function playStreaming() {
   };
 
   const offsetSeconds = audioOffset / SAMPLE_RATE;
+  // Resume AudioContext (may be suspended in offscreen documents)
+  await audioCtx.resume();
   sourceNode.start(0, offsetSeconds);
   audioStartTime = audioCtx.currentTime - offsetSeconds;
   isStreamingPlaying = true;
@@ -405,25 +408,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'streamingChunk':
       // Real-time streaming PCM chunk — append and play immediately
+      console.log('[OFFSCREEN] streamingChunk received, size:', message.chunk.length, 'rate:', message.rate);
       if (!audioCtx) {
         initStreamingAudio(message.rate);
+        console.log('[OFFSCREEN] AudioContext created, playbackRate:', streamPlaybackRate);
       }
       appendStreamingChunk(message.chunk);
+      console.log('[OFFSCREEN] Buffer: frames=', bufferLength, 'duration=', (bufferLength / SAMPLE_RATE).toFixed(2), 's');
 
       // Start playing on first chunk if not already playing
       if (!isStreamingPlaying && !isStreamingPaused) {
-        playStreaming();
+        console.log('[OFFSCREEN] Starting streaming playback');
+        playStreaming().catch(console.error);
       } else if (isStreamingPaused) {
         // If paused, don't auto-resume — wait for explicit play command
       } else if (isStreamingPlaying && !sourceNode) {
         // Source ended but more chunks arrived — restart playback from offset
-        playStreaming();
-      }
-
-      // Notify background that first chunk arrived (transition to playing)
-      if (message.rate !== undefined) {
-        // First chunk — signal playing state
-        chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'playing' });
+        console.log('[OFFSCREEN] Restarting playback after source end');
+        playStreaming().catch(console.error);
       }
       break;
 
@@ -441,9 +443,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'play':
       if (isStreamingPlaying || (audioCtx && bufferLength > 0)) {
         if (isStreamingPaused) {
-          playStreaming(); // resumes from saved offset
+          playStreaming().catch(console.error); // resumes from saved offset
         } else if (!isStreamingPlaying) {
-          playStreaming(); // start from beginning or saved offset
+          playStreaming().catch(console.error); // start from beginning or saved offset
         }
       } else if (audioElement) {
         audioElement.play();
