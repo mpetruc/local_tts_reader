@@ -477,8 +477,7 @@ async function startStreamingAudioStream(text, settings) {
           voice: settings.voice,
           input: chunks[i],
           stream: true,
-          response_format: 'pcm',
-          speed: rate
+          response_format: 'pcm'
         }),
         signal: abortController ? abortController.signal : undefined
       });
