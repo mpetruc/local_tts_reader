@@ -235,9 +235,10 @@ async function playStreaming() {
   sourceNode.playbackRate.value = streamPlaybackRate;
   console.log('[OFFSCREEN] playStreaming: offset=', audioOffset, 'bufferLen=', bufferLength, 'rate=', streamPlaybackRate);
   sourceNode.onended = () => {
-    // Only transition to stopped if we've played all buffered audio
-    // and no new chunks are expected (source ended naturally)
-    sendDiagnostic('sourceNode.onended fired, offset=' + audioOffset + ' bufferLen=' + bufferLength);
+    // Calculate how far we actually played and advance audioOffset
+    const elapsedFrames = Math.floor((audioCtx.currentTime - audioStartTime) * SAMPLE_RATE / streamPlaybackRate);
+    audioOffset = Math.min(audioOffset + elapsedFrames, bufferLength);
+    sendDiagnostic('sourceNode.onended fired, elapsedFrames=' + elapsedFrames + ' newOffset=' + audioOffset + ' bufferLen=' + bufferLength);
     if (audioOffset >= bufferLength) {
       isStreamingPlaying = false;
       isStreamingPaused = false;
@@ -249,9 +250,11 @@ async function playStreaming() {
       sendDiagnostic('Playback stopped (all audio consumed)');
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'stopped' });
     } else {
-      // Buffer grew while playing — more chunks will trigger restart
-      sendDiagnostic('source ended but buffer still growing, will restart');
-      sourceNode = null; // allow new source to be created
+      // Buffer grew while playing — restart immediately from new offset
+      sendDiagnostic('source ended but buffer still growing, restarting from offset ' + audioOffset);
+      sourceNode = null;
+      isStreamingPlaying = false;
+      playStreaming().catch(console.error);
     }
     // If buffer grew (more chunks arrived), the message handler will restart playback
   };
@@ -261,8 +264,10 @@ async function playStreaming() {
   // Resume AudioContext (may be suspended in offscreen documents)
   await audioCtx.resume();
   sendDiagnostic('playStreaming: ctx state after resume: ' + audioCtx.state);
-  sourceNode.start(0, offsetSeconds);
-  sendDiagnostic('sourceNode.start() called at offset ' + offsetSeconds + 's, bufferLen=' + bufferLength);
+  // Only play the valid portion (bufferLength), not the full capacity
+  const duration = (bufferLength - audioOffset) / SAMPLE_RATE;
+  sourceNode.start(0, offsetSeconds, duration);
+  sendDiagnostic('sourceNode.start() called at offset ' + offsetSeconds + 's, duration=' + duration.toFixed(2) + 's, bufferLen=' + bufferLength);
   audioStartTime = audioCtx.currentTime - offsetSeconds;
   isStreamingPlaying = true;
   isStreamingPaused = false;
