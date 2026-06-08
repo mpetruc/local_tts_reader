@@ -548,6 +548,8 @@ async function startStreamingAudio(text, settings) {
     if (useStreaming) {
       // ── Real-time streaming mode ──
       console.log('[BG] Starting real-time streaming');
+      // Reset offscreen streaming state before starting a new session
+      chrome.runtime.sendMessage({ type: 'resetStreaming' });
       abortController = new AbortController();
       try {
         await startStreamingAudioStream(text, settings);

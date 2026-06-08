@@ -426,6 +426,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       break;
 
+    case 'resetStreaming':
+      // Clear all streaming state before a new session
+      sendDiagnostic('Resetting streaming state');
+      if (sourceNode) {
+        try { sourceNode.stop(); } catch {}
+        sourceNode = null;
+      }
+      if (timeUpdateInterval) {
+        clearInterval(timeUpdateInterval);
+        timeUpdateInterval = null;
+      }
+      if (audioCtx) {
+        try { audioCtx.close(); } catch {}
+        audioCtx = null;
+      }
+      audioBuffer = null;
+      bufferLength = 0;
+      bufferCapacity = 0;
+      audioOffset = 0;
+      audioStartTime = 0;
+      isStreamingPlaying = false;
+      isStreamingPaused = false;
+      streamDuration = 0;
+      streamPlaybackRate = 1;
+      break;
+
     case 'streamingChunk':
       // Real-time streaming PCM chunk — append and play immediately
       sendDiagnostic('streamingChunk received, size: ' + message.chunk.length + ' rate: ' + message.rate);
