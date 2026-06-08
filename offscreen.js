@@ -146,7 +146,9 @@ function initStreamingAudio() {
     document.body.appendChild(streamAudio);
 
     streamAudio.onplay = () => {
-      if (streamSwappingSrc) return;
+      // Note: no streamSwappingSrc guard here — we always need to broadcast
+      // 'playing' state when playback starts or resumes after a blob swap
+      if (streamIsPlaying && !streamIsPaused) return; // idempotent guard
       streamIsPlaying = true;
       streamIsPaused = false;
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'playing' });

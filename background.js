@@ -572,6 +572,12 @@ async function startStreamingAudio(text, settings) {
       // Reset offscreen streaming state before starting a new session
       chrome.runtime.sendMessage({ type: 'resetStreaming' });
       abortController = new AbortController();
+      // Transition to 'playing' as soon as streaming begins — offscreen will
+      // auto-play once it has enough buffered audio (START_THRESHOLD).
+      // This ensures the popup UI shows controls immediately, not after waiting
+      // for the offscreen onplay event (which was blocked by streamSwappingSrc).
+      currentPlayerState = 'playing';
+      chrome.runtime.sendMessage({ type: 'playerStateUpdate', state: 'playing' });
       try {
         await startStreamingAudioStream(text, settings);
       } finally {
