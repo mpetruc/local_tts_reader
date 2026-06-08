@@ -27,6 +27,7 @@ let streamAudio = null;           // <audio> element for streaming
 let streamChunks = [];            // raw PCM chunks (Uint8Array[], concat only on swap)
 let streamBlobUrl = null;         // current blob URL
 let streamBlobDuration = 0;       // duration of current blob (seconds)
+let streamBlobBytes = 0;          // PCM bytes in current blob
 let streamIsPlaying = false;      // user-intended playing state
 let streamIsPaused = false;       // user-intended paused state
 let streamComplete = false;       // all chunks received
@@ -160,6 +161,19 @@ function initStreamingAudio() {
     };
 
     streamAudio.onended = () => {
+      // More chunks may have accumulated — force swap and keep playing
+      // Only if total accumulated data exceeds what's in the current blob
+      const totalBytes = streamChunks.reduce((s, c) => s + c.length, 0);
+      if (totalBytes > streamBlobBytes && !streamComplete) {
+        sendDiagnostic('onended but more data available (' + totalBytes + ' > ' + streamBlobBytes + ') — continuing');
+        swapStreamingBlob();
+        if (streamIsPlaying) {
+          streamSwappingSrc = true;
+          streamAudio.play().catch(() => {});
+          setTimeout(() => { streamSwappingSrc = false; }, 0);
+        }
+        return;
+      }
       streamIsPlaying = false;
       streamIsPaused = false;
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'stopped' });
@@ -174,7 +188,8 @@ function initStreamingAudio() {
 
     streamAudio.onwaiting = () => {
       // Audio element ran out of data — force swap with accumulated chunks
-      if (streamIsPlaying && streamChunks.length > 0 && !streamSwappingSrc) {
+      const totalBytes = streamChunks.reduce((s, c) => s + c.length, 0);
+      if (streamIsPlaying && totalBytes > streamBlobBytes && !streamSwappingSrc) {
         sendDiagnostic('waiting event — forcing blob swap');
         swapStreamingBlob();
       }
@@ -228,6 +243,7 @@ function swapStreamingBlob() {
   const pcm = concatStreamChunks();
   streamBlobUrl = URL.createObjectURL(pcmToWavBlob(pcm));
   streamBlobDuration = pcm.length / 2 / SAMPLE_RATE;
+  streamBlobBytes = pcm.length;
 
   streamAudio.src = streamBlobUrl;
   streamAudio.currentTime = currentTime;
@@ -277,6 +293,7 @@ function stopStreaming() {
   }
   streamChunks = [];
   streamBlobDuration = 0;
+  streamBlobBytes = 0;
   streamPlaybackRate = 1;
   streamLastSwapTime = 0;
 }
