@@ -24,14 +24,17 @@ let audioChunks = [];
 
 // ── Streaming state (audioElement-based, preserves pitch) ──
 let streamAudio = null;           // <audio> element for streaming
-let streamPcm = null;             // Uint8Array accumulator (raw 16-bit LE PCM)
+let streamChunks = [];            // raw PCM chunks (Uint8Array[], concat only on swap)
 let streamBlobUrl = null;         // current blob URL
+let streamBlobDuration = 0;       // duration of current blob (seconds)
 let streamIsPlaying = false;      // user-intended playing state
 let streamIsPaused = false;       // user-intended paused state
 let streamComplete = false;       // all chunks received
 let streamPlaybackRate = 1;       // requested playback rate
 let streamSwappingSrc = false;    // guard against spurious pause events during src swap
 const SAMPLE_RATE = 24000;        // TTS server sample rate
+const SWAP_MARGIN = 2.0;          // swap blob when within this many seconds of buffer end (seconds)
+const START_THRESHOLD = 1.0;      // minimum buffered seconds before starting playback (seconds)
 
 // Send diagnostic info to background console
 function sendDiagnostic(msg) {
@@ -167,16 +170,40 @@ function initStreamingAudio() {
         streamAudio.play().catch(() => {});
       }
     };
+
+    streamAudio.onwaiting = () => {
+      // Audio element ran out of data — force swap with accumulated chunks
+      if (streamIsPlaying && streamChunks.length > 0 && !streamSwappingSrc) {
+        sendDiagnostic('waiting event — forcing blob swap');
+        swapStreamingBlob();
+      }
+    };
   }
 }
 
-// Append a raw PCM chunk (16-bit LE mono, array of bytes) to streamPcm.
-function appendStreamingChunk(chunkArray) {
-  const chunk = new Uint8Array(chunkArray);
-  const newPcm = new Uint8Array(streamPcm.length + chunk.length);
-  newPcm.set(streamPcm);
-  newPcm.set(chunk, streamPcm.length);
-  streamPcm = newPcm;
+// ── Streaming helpers (audioElement + WAV blob, lazy swap) ──
+
+// Concat accumulated chunks into a single Uint8Array.
+function concatStreamChunks() {
+  let totalLen = 0;
+  for (let i = 0; i < streamChunks.length; i++) totalLen += streamChunks[i].length;
+  const result = new Uint8Array(totalLen);
+  let off = 0;
+  for (let i = 0; i < streamChunks.length; i++) {
+    result.set(streamChunks[i], off);
+    off += streamChunks[i].length;
+  }
+  return result;
+}
+
+// Check if we need to swap the blob (playback head near buffer edge).
+function needsSwap() {
+  if (!streamAudio || !streamBlobUrl) return true; // first swap
+  const pos = streamAudio.currentTime;
+  const remain = streamBlobDuration - pos;
+  // Account for playback rate: at 2x speed, 2s of buffer drains in 1s wall-clock
+  const effectiveRemain = remain * streamPlaybackRate;
+  return effectiveRemain <= SWAP_MARGIN;
 }
 
 // Create a new WAV blob URL and swap it into the streaming audio element.
@@ -187,8 +214,17 @@ function swapStreamingBlob() {
   const currentTime = streamAudio.currentTime;
   const wasPlaying = streamIsPlaying && !streamIsPaused && !streamAudio.paused;
 
-  // Swap source
-  streamBlobUrl = URL.createObjectURL(pcmToWavBlob(streamPcm));
+  // Revoke old blob URL to free memory
+  if (streamBlobUrl) {
+    URL.revokeObjectURL(streamBlobUrl);
+    streamBlobUrl = null;
+  }
+
+  // Concat all accumulated chunks into WAV
+  const pcm = concatStreamChunks();
+  streamBlobUrl = URL.createObjectURL(pcmToWavBlob(pcm));
+  streamBlobDuration = pcm.length / 2 / SAMPLE_RATE;
+
   streamAudio.src = streamBlobUrl;
   streamAudio.currentTime = currentTime;
   streamAudio.playbackRate = streamPlaybackRate;
@@ -196,7 +232,6 @@ function swapStreamingBlob() {
   if (wasPlaying) {
     streamSwappingSrc = true;
     streamAudio.play().catch(() => {});
-    // Clear guard after a tick — events from the swap are synchronous
     setTimeout(() => { streamSwappingSrc = false; }, 0);
   }
 }
@@ -236,7 +271,8 @@ function stopStreaming() {
     URL.revokeObjectURL(streamBlobUrl);
     streamBlobUrl = null;
   }
-  streamPcm = null;
+  streamChunks = [];
+  streamBlobDuration = 0;
   streamPlaybackRate = 1;
 }
 
@@ -249,7 +285,7 @@ function resetStreaming() {
 // ── Shared helpers ──
 
 function getPlayerState() {
-  if (streamIsPlaying || (streamPcm && streamAudio && streamAudio.src)) {
+  if (streamChunks.length > 0 && streamAudio && streamAudio.src) {
     return streamIsPaused ? 'paused' : (streamIsPlaying ? 'playing' : 'stopped');
   }
   if (!audioElement) return 'stopped';
@@ -260,7 +296,7 @@ function getPlayerState() {
 }
 
 function getTimeInfo() {
-  if (streamPcm && streamAudio && streamAudio.src) {
+  if (streamChunks.length > 0 && streamAudio && streamAudio.src) {
     return {
       currentTime: streamAudio.currentTime,
       duration: streamAudio.duration || 0
@@ -274,7 +310,7 @@ function getTimeInfo() {
 }
 
 function seekTo(time) {
-  if (streamPcm && streamAudio && streamAudio.src) {
+  if (streamChunks.length > 0 && streamAudio && streamAudio.src) {
     const maxTime = streamAudio.duration || 0;
     streamAudio.currentTime = Math.max(0, Math.min(time, maxTime));
     return true;
@@ -319,25 +355,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'streamingChunk':
       sendDiagnostic('streamingChunk received, size: ' + message.chunk.length + ' rate: ' + message.rate);
-      if (!streamPcm) {
+      if (streamChunks.length === 0) {
         initStreamingAudio();
-        streamPcm = new Uint8Array(0);
+        streamChunks = [];
         streamPlaybackRate = (message.rate && !isNaN(message.rate) && message.rate > 0) ? message.rate : 1;
         sendDiagnostic('Streaming initialized, playbackRate: ' + streamPlaybackRate);
       }
-      appendStreamingChunk(message.chunk);
-      sendDiagnostic('Buffer: bytes=' + streamPcm.length + ' duration=' + (streamPcm.length / 2 / SAMPLE_RATE).toFixed(2) + 's');
-      swapStreamingBlob();
-      // Auto-play on first chunk
-      if (!streamIsPlaying && !streamIsPaused) {
-        sendDiagnostic('Starting streaming playback');
+      streamChunks.push(new Uint8Array(message.chunk));
+      const totalBytes = streamChunks.reduce((s, c) => s + c.length, 0);
+      sendDiagnostic('Buffer: chunks=' + streamChunks.length + ' bytes=' + totalBytes + ' duration=' + (totalBytes / 2 / SAMPLE_RATE).toFixed(2) + 's');
+
+      // Lazy swap: only create new blob when playback is catching up
+      if (needsSwap()) {
+        swapStreamingBlob();
+      }
+
+      // Auto-play once we have enough initial buffer
+      if (!streamIsPlaying && !streamIsPaused && totalBytes / 2 / SAMPLE_RATE >= START_THRESHOLD) {
+        sendDiagnostic('Starting streaming playback (' + (totalBytes / 2 / SAMPLE_RATE).toFixed(2) + 's buffered)');
         playStreaming();
       }
       break;
 
     case 'streamComplete':
       streamComplete = true;
-      sendDiagnostic('Stream complete, total duration=' + (streamPcm ? (streamPcm.length / 2 / SAMPLE_RATE).toFixed(2) : 'N/A') + 's');
+      sendDiagnostic('Stream complete, total duration=' + (streamChunks.length > 0 ? (streamChunks.reduce((s, c) => s + c.length, 0) / 2 / SAMPLE_RATE).toFixed(2) : 'N/A') + 's');
       break;
 
     case 'processAudioData':
@@ -351,7 +393,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'play':
-      if (streamPcm && streamAudio && streamAudio.src) {
+      if (streamChunks.length > 0 && streamAudio && streamAudio.src) {
         if (streamIsPaused || !streamIsPlaying) {
           playStreaming();
         }
