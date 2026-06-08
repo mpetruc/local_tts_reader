@@ -278,7 +278,7 @@ async function playStreaming() {
   if (timeUpdateInterval) clearInterval(timeUpdateInterval);
   timeUpdateInterval = setInterval(() => {
     if (!isStreamingPlaying || isStreamingPaused) return;
-    const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
+    const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE / streamPlaybackRate;
     const currentFrame = Math.min(audioOffset + elapsed, bufferLength);
     const currentTime = currentFrame / SAMPLE_RATE;
     chrome.runtime.sendMessage({
@@ -296,7 +296,7 @@ function pauseStreaming() {
   if (!isStreamingPlaying || isStreamingPaused) return;
 
   // Save current playback position
-  const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
+  const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE / streamPlaybackRate;
   audioOffset = Math.min(audioOffset + elapsed, bufferLength);
 
   // Stop the current source
@@ -358,7 +358,7 @@ function getTimeInfo() {
   if (isStreamingPlaying || (audioCtx && bufferLength > 0)) {
     let currentFrame = audioOffset;
     if (isStreamingPlaying && !isStreamingPaused && audioCtx) {
-      const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
+      const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE / streamPlaybackRate;
       currentFrame = Math.min(audioOffset + elapsed, bufferLength);
     }
     return {
