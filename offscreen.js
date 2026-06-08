@@ -34,6 +34,7 @@ let streamComplete = false;       // all chunks received
 let streamPlaybackRate = 1;       // requested playback rate
 let streamSwappingSrc = false;    // guard against spurious pause events during src swap
 let streamLastSwapTime = 0;        // wall-clock ms of last blob swap
+let streamEndDeferred = null;      // timeout ID to prevent recursive onended
 const SAMPLE_RATE = 24000;        // TTS server sample rate
 const SWAP_MARGIN = 4.0;          // swap blob when within this many seconds of buffer end (seconds)
 const SWAP_MIN_INTERVAL = 1500;   // minimum ms between swaps (debounce)
@@ -161,17 +162,13 @@ function initStreamingAudio() {
     };
 
     streamAudio.onended = () => {
-      // More chunks may have accumulated — force swap and keep playing
-      // Only if total accumulated data exceeds what's in the current blob
+      // Blob ended — if more chunks accumulated, swap and keep playing
+      // Guard: prevent recursive onended during swap
+      if (streamSwappingSrc || !streamIsPlaying) return;
       const totalBytes = streamChunks.reduce((s, c) => s + c.length, 0);
       if (totalBytes > streamBlobBytes && !streamComplete) {
-        sendDiagnostic('onended but more data available (' + totalBytes + ' > ' + streamBlobBytes + ') — continuing');
+        sendDiagnostic('onended — more data available (' + totalBytes + ' > ' + streamBlobBytes + ') — continuing');
         swapStreamingBlob();
-        if (streamIsPlaying) {
-          streamSwappingSrc = true;
-          streamAudio.play().catch(() => {});
-          setTimeout(() => { streamSwappingSrc = false; }, 0);
-        }
         return;
       }
       streamIsPlaying = false;
@@ -217,6 +214,9 @@ function needsSwap() {
   if (!streamAudio || !streamBlobUrl) return true; // first swap
   // Debounce: don't swap too frequently
   if (Date.now() - streamLastSwapTime < SWAP_MIN_INTERVAL) return false;
+  // Only swap if there's actually new data to add
+  const totalBytes = streamChunks.reduce((s, c) => s + c.length, 0);
+  if (totalBytes <= streamBlobBytes) return false;
   const pos = streamAudio.currentTime;
   const remain = streamBlobDuration - pos;
   // Account for playback rate: at 2x speed, 4s of buffer drains in 2s wall-clock
@@ -296,6 +296,7 @@ function stopStreaming() {
   streamBlobBytes = 0;
   streamPlaybackRate = 1;
   streamLastSwapTime = 0;
+  if (streamEndDeferred) { clearTimeout(streamEndDeferred); streamEndDeferred = null; }
 }
 // Reset streaming state before a new session.
 function resetStreaming() {
