@@ -232,11 +232,11 @@ async function playStreaming() {
   // Use the full buffer but start at the offset
   sourceNode.buffer = audioBuffer;
   sourceNode.connect(audioCtx.destination);
-  sourceNode.playbackRate.value = streamPlaybackRate;
-  console.log('[OFFSCREEN] playStreaming: offset=', audioOffset, 'bufferLen=', bufferLength, 'rate=', streamPlaybackRate);
+  // Server handles speed — client always plays at rate 1
+  console.log('[OFFSCREEN] playStreaming: offset=', audioOffset, 'bufferLen=', bufferLength);
   sourceNode.onended = () => {
     // Calculate how far we actually played and advance audioOffset
-    const elapsedFrames = Math.floor((audioCtx.currentTime - audioStartTime) * SAMPLE_RATE * streamPlaybackRate);
+    const elapsedFrames = Math.floor((audioCtx.currentTime - audioStartTime) * SAMPLE_RATE);
     audioOffset = Math.min(audioOffset + elapsedFrames, bufferLength);
     sendDiagnostic('sourceNode.onended fired, elapsedFrames=' + elapsedFrames + ' newOffset=' + audioOffset + ' bufferLen=' + bufferLength);
     if (audioOffset >= bufferLength) {
@@ -278,7 +278,7 @@ async function playStreaming() {
   if (timeUpdateInterval) clearInterval(timeUpdateInterval);
   timeUpdateInterval = setInterval(() => {
     if (!isStreamingPlaying || isStreamingPaused) return;
-    const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE * streamPlaybackRate;
+    const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
     const currentFrame = Math.min(audioOffset + elapsed, bufferLength);
     const currentTime = currentFrame / SAMPLE_RATE;
     chrome.runtime.sendMessage({
@@ -296,7 +296,7 @@ function pauseStreaming() {
   if (!isStreamingPlaying || isStreamingPaused) return;
 
   // Save current playback position
-  const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE * streamPlaybackRate;
+  const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
   audioOffset = Math.min(audioOffset + elapsed, bufferLength);
 
   // Stop the current source
@@ -358,7 +358,7 @@ function getTimeInfo() {
   if (isStreamingPlaying || (audioCtx && bufferLength > 0)) {
     let currentFrame = audioOffset;
     if (isStreamingPlaying && !isStreamingPaused && audioCtx) {
-      const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE * streamPlaybackRate;
+      const elapsed = (audioCtx.currentTime - audioStartTime) * SAMPLE_RATE;
       currentFrame = Math.min(audioOffset + elapsed, bufferLength);
     }
     return {
