@@ -37,6 +37,12 @@ let streamPlaybackRate = 1;    // playback rate for streaming mode
 let timeUpdateInterval = null;
 const SAMPLE_RATE = 24000;     // TTS server sample rate
 
+
+// Send diagnostic info to background console (offscreen logs are in separate DevTools)
+function sendDiagnostic(msg) {
+  console.log('[OFFSCREEN]', msg);
+  chrome.runtime.sendMessage({ type: 'streamingDiagnostic', msg });
+}
 // ── Non-streaming helpers ──
 
 // Ensure the audio element exists
@@ -231,6 +237,7 @@ async function playStreaming() {
   sourceNode.onended = () => {
     // Only transition to stopped if we've played all buffered audio
     // and no new chunks are expected (source ended naturally)
+    sendDiagnostic('sourceNode.onended fired, offset=' + audioOffset + ' bufferLen=' + bufferLength);
     if (audioOffset >= bufferLength) {
       isStreamingPlaying = false;
       isStreamingPaused = false;
@@ -239,15 +246,23 @@ async function playStreaming() {
         clearInterval(timeUpdateInterval);
         timeUpdateInterval = null;
       }
+      sendDiagnostic('Playback stopped (all audio consumed)');
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'stopped' });
+    } else {
+      // Buffer grew while playing — more chunks will trigger restart
+      sendDiagnostic('source ended but buffer still growing, will restart');
+      sourceNode = null; // allow new source to be created
     }
     // If buffer grew (more chunks arrived), the message handler will restart playback
   };
 
   const offsetSeconds = audioOffset / SAMPLE_RATE;
+  sendDiagnostic('playStreaming: ctx state before resume: ' + audioCtx.state);
   // Resume AudioContext (may be suspended in offscreen documents)
   await audioCtx.resume();
+  sendDiagnostic('playStreaming: ctx state after resume: ' + audioCtx.state);
   sourceNode.start(0, offsetSeconds);
+  sendDiagnostic('sourceNode.start() called at offset ' + offsetSeconds + 's, bufferLen=' + bufferLength);
   audioStartTime = audioCtx.currentTime - offsetSeconds;
   isStreamingPlaying = true;
   isStreamingPaused = false;
@@ -408,25 +423,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'streamingChunk':
       // Real-time streaming PCM chunk — append and play immediately
-      console.log('[OFFSCREEN] streamingChunk received, size:', message.chunk.length, 'rate:', message.rate);
+      sendDiagnostic('streamingChunk received, size: ' + message.chunk.length + ' rate: ' + message.rate);
       if (!audioCtx) {
         initStreamingAudio(message.rate);
-        console.log('[OFFSCREEN] AudioContext created, playbackRate:', streamPlaybackRate);
+        sendDiagnostic('AudioContext created, playbackRate: ' + streamPlaybackRate);
       }
       appendStreamingChunk(message.chunk);
-      console.log('[OFFSCREEN] Buffer: frames=', bufferLength, 'duration=', (bufferLength / SAMPLE_RATE).toFixed(2), 's');
-      // Echo diagnostic back to background console
-      chrome.runtime.sendMessage({ type: 'streamingDiagnostic', frames: bufferLength, playing: isStreamingPlaying, paused: isStreamingPaused });
+      sendDiagnostic('Buffer: frames=' + bufferLength + ' duration=' + (bufferLength / SAMPLE_RATE).toFixed(2) + 's');
 
       // Start playing on first chunk if not already playing
       if (!isStreamingPlaying && !isStreamingPaused) {
-        console.log('[OFFSCREEN] Starting streaming playback');
+        sendDiagnostic('Starting streaming playback');
         playStreaming().catch(console.error);
       } else if (isStreamingPaused) {
         // If paused, don't auto-resume — wait for explicit play command
       } else if (isStreamingPlaying && !sourceNode) {
         // Source ended but more chunks arrived — restart playback from offset
-        console.log('[OFFSCREEN] Restarting playback after source end');
+        sendDiagnostic('Restarting playback after source end');
         playStreaming().catch(console.error);
       }
       break;

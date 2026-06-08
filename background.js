@@ -317,7 +317,7 @@ case 'startStreaming':
       return true;
       
     case 'streamingDiagnostic':
-      console.log('[BG] streamingDiagnostic from offscreen:', message);
+      console.log('[BG] streamingDiagnostic from offscreen:', message.msg || message);
       return true;
   }
 });
