@@ -5,7 +5,8 @@ const DEFAULT_SETTINGS = {
     recordAudio: false,
     preprocessText: true,
     highlightSentences: false,
-    outputFormat: 'mp3'
+    outputFormat: 'mp3',
+    streamChunkMaxChars: 400
   };
   
   if (typeof module !== 'undefined' && module.exports) {

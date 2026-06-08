@@ -4,7 +4,8 @@ let currentPlayerState = 'stopped';
 let currentSentences = null;
 let currentHighlightTabId = null;
 let currentSentenceIndex = -1;
-
+let currentWordIndex = -1;
+let abortController = null; // AbortController for cancelling streaming TTS requests
 // Create or get the offscreen document
 // Helper: try to ping offscreen to verify it is alive
 async function pingOffscreen() {
@@ -294,6 +295,24 @@ case 'startStreaming':
         }
       }
       return true;
+      
+    case 'stop':
+      // Abort any in-flight streaming TTS request
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+      currentPlayerState = 'stopped';
+      chrome.runtime.sendMessage({ type: 'playerStateUpdate', state: 'stopped' });
+      // Clear highlights when stopped
+      if (currentHighlightTabId) {
+        chrome.tabs.sendMessage(currentHighlightTabId, { type: 'clearHighlight' }).catch(() => {});
+        currentSentences = null;
+        currentHighlightTabId = null;
+        currentSentenceIndex = -1;
+        currentWordIndex = -1;
+      }
+      return true;
   }
 });
 
@@ -395,6 +414,108 @@ async function sendAudioChunks(audioBytes, mimeType, rate = 1) {
   }
   console.log('[BG] All', totalChunks, 'chunks sent successfully');
 }
+
+// Split text into sentence-bounded chunks for streaming synthesis.
+// Each chunk is at most `maxChars` characters (default 400), split at
+// sentence boundaries (., !, ?) to preserve speech coherence.
+function splitTextIntoChunks(text, maxChars) {
+  maxChars = maxChars || DEFAULT_SETTINGS.streamChunkMaxChars;
+  // Extract sentences (text ending with sentence punctuation)
+  const sentences = text.match(/[^.!?]*[.!?]["')\\]*\\s*/g);
+  if (!sentences) {
+    // No sentence-ending punctuation — treat the whole text as one chunk
+    return text.trim() ? [text.trim()] : [];
+  }
+  const chunks = [];
+  let buf = '';
+  for (const s of sentences) {
+    const trimmed = s.trim();
+    if (!trimmed) continue;
+    if ((buf + ' ' + trimmed).trim().length > maxChars && buf) {
+      chunks.push(buf.trim());
+      buf = trimmed;
+    } else {
+      buf = buf ? buf + ' ' + trimmed : trimmed;
+    }
+  }
+  if (buf.trim()) chunks.push(buf.trim());
+  return chunks;
+}
+
+// Stream audio from the TTS server in real-time.
+// Splits text into chunks, sends each to the TTS API with stream:true,
+// and forwards PCM audio to the offscreen document as it arrives.
+async function startStreamingAudioStream(text, settings) {
+  const chunks = splitTextIntoChunks(text, settings.streamChunkMaxChars);
+  if (chunks.length === 0) {
+    chrome.runtime.sendMessage({ type: 'playerStateUpdate', state: 'stopped' });
+    return;
+  }
+
+  const baseUrl = settings.serverUrl.replace(/\/v1\/audio\/speech\/?$/, '').replace(/\/*$/, '');
+  const speechUrl = `${baseUrl}/v1/audio/speech`;
+  const rate = parseFloat(settings.speed) || 1;
+
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      if (abortController && abortController.signal.aborted) break;
+
+      const response = await fetch(speechUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'tts-1',
+          voice: settings.voice,
+          input: chunks[i],
+          stream: true,
+          response_format: 'pcm'
+        }),
+        signal: abortController ? abortController.signal : undefined
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      // Read the PCM stream and forward to offscreen in chunks
+      const reader = response.body.getReader();
+      let streamOffset = 0;
+      const MSG_CHUNK = 256 * 1024; // 256 KB per message
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // Send in sub-chunks to stay under sendMessage payload limits
+        for (let pos = 0; pos < value.length; pos += MSG_CHUNK) {
+          const end = Math.min(pos + MSG_CHUNK, value.length);
+          const subChunk = Array.from(value.slice(pos, end));
+          await chrome.runtime.sendMessage({
+            type: 'streamingChunk',
+            chunk: subChunk,
+            sequence: i,
+            offset: streamOffset,
+            isLast: i === chunks.length - 1 && end >= value.length,
+            rate: i === 0 ? rate : undefined
+          });
+          streamOffset += end - pos;
+        }
+      }
+    }
+
+    // Signal completion — if no chunks were sent, ensure state is set
+    if (currentPlayerState === 'loading') {
+      currentPlayerState = 'stopped';
+      chrome.runtime.sendMessage({ type: 'playerStateUpdate', state: 'stopped' });
+    }
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      console.log('[BG] Streaming aborted');
+      return;
+    }
+    throw error;
+  }
+}
 // Start streaming audio from the TTS server
 async function startStreamingAudio(text, settings) {
   try {
@@ -406,8 +527,25 @@ async function startStreamingAudio(text, settings) {
       throw new Error('Voice selection is empty or invalid');
     }
 
-    // Ensure the URL is a base URL (remove any trailing '/v1/audio/speech' path)
-    const baseUrl = settings.serverUrl.replace(/\/v1\/audio\/speech\/?$/,'').replace(/\/*$/,'');
+    // ── Branch: streaming (real-time) vs non-streaming (save/highlight) ──
+    // Streaming starts playback as soon as the first audio chunk arrives.
+    // Non-streaming waits for the full response — required when saving audio
+    // or when sentence highlighting needs word-level timestamps.
+    const useStreaming = !isRecording && !(settings.highlightSentences && settings.tabId);
+
+    if (useStreaming) {
+      // ── Real-time streaming mode ──
+      abortController = new AbortController();
+      try {
+        await startStreamingAudioStream(text, settings);
+      } finally {
+        abortController = null;
+      }
+      return;
+    }
+
+    // ── Non-streaming mode (save audio / highlight sentences) ──
+    const baseUrl = settings.serverUrl.replace(/\/v1\/audio\/speech\/?$/, '').replace(/\/*$/, '');
 
     let audioBytes;
     let mimeType;
@@ -581,5 +719,5 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 if (typeof module !== 'undefined') {
-  module.exports = { startStreamingAudio, groupTimestampsIntoSentences };
+  module.exports = { startStreamingAudio, startStreamingAudioStream, splitTextIntoChunks, groupTimestampsIntoSentences };
 }
