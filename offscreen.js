@@ -35,6 +35,7 @@ let streamPlaybackRate = 1;       // requested playback rate
 let streamSwappingSrc = false;    // guard against spurious pause events during src swap
 let streamLastSwapTime = 0;        // wall-clock ms of last blob swap
 let streamEndDeferred = null;      // timeout ID to prevent recursive onended
+let streamPauseDeferred = null;    // timeout ID to defer onpause (let onended win)
 const SAMPLE_RATE = 24000;        // TTS server sample rate
 const SWAP_MARGIN = 4.0;          // swap blob when within this many seconds of buffer end (seconds)
 const SWAP_MIN_INTERVAL = 1500;   // minimum ms between swaps (debounce)
@@ -153,18 +154,23 @@ function initStreamingAudio() {
 
     streamAudio.onpause = () => {
       if (streamSwappingSrc) return;
-      // Don't override state if we're still supposed to be playing
-      // (browser may pause briefly during buffer operations)
-      if (!streamIsPlaying) return;
-      streamIsPlaying = false;
-      streamIsPaused = true;
-      chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'paused' });
+      // Defer state change so onended (which fires right after pause at end) can win
+      if (streamPauseDeferred) clearTimeout(streamPauseDeferred);
+      streamPauseDeferred = setTimeout(() => {
+        streamPauseDeferred = null;
+        if (!streamIsPlaying) return;
+        streamIsPlaying = false;
+        streamIsPaused = true;
+        chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'paused' });
+      }, 50);
     };
 
     streamAudio.onended = () => {
+      // Cancel deferred onpause so onended wins the race
+      if (streamPauseDeferred) { clearTimeout(streamPauseDeferred); streamPauseDeferred = null; }
       // Blob ended — if more chunks accumulated, swap and keep playing
-      // Guard: prevent recursive onended during swap
-      if (streamSwappingSrc || !streamIsPlaying) return;
+      // Guard: prevent recursive onended during swap only
+      if (streamSwappingSrc) return;
       const totalBytes = streamChunks.reduce((s, c) => s + c.length, 0);
       if (totalBytes > streamBlobBytes && !streamComplete) {
         sendDiagnostic('onended — more data available (' + totalBytes + ' > ' + streamBlobBytes + ') — continuing');
@@ -176,6 +182,7 @@ function initStreamingAudio() {
         setTimeout(() => { streamSwappingSrc = false; }, 0);
         return;
       }
+
       streamIsPlaying = false;
       streamIsPaused = false;
       chrome.runtime.sendMessage({ type: 'stateUpdate', state: 'stopped' });
@@ -306,7 +313,9 @@ function stopStreaming() {
   streamPlaybackRate = 1;
   streamLastSwapTime = 0;
   if (streamEndDeferred) { clearTimeout(streamEndDeferred); streamEndDeferred = null; }
+  if (streamPauseDeferred) { clearTimeout(streamPauseDeferred); streamPauseDeferred = null; }
 }
+
 // Reset streaming state before a new session.
 function resetStreaming() {
   sendDiagnostic('Resetting streaming state');
