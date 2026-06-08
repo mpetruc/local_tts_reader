@@ -32,10 +32,11 @@ let streamIsPaused = false;       // user-intended paused state
 let streamComplete = false;       // all chunks received
 let streamPlaybackRate = 1;       // requested playback rate
 let streamSwappingSrc = false;    // guard against spurious pause events during src swap
+let streamLastSwapTime = 0;        // wall-clock ms of last blob swap
 const SAMPLE_RATE = 24000;        // TTS server sample rate
-const SWAP_MARGIN = 2.0;          // swap blob when within this many seconds of buffer end (seconds)
-const START_THRESHOLD = 1.0;      // minimum buffered seconds before starting playback (seconds)
-
+const SWAP_MARGIN = 4.0;          // swap blob when within this many seconds of buffer end (seconds)
+const SWAP_MIN_INTERVAL = 1500;   // minimum ms between swaps (debounce)
+const START_THRESHOLD = 2.0;      // minimum buffered seconds before starting playback (seconds)
 // Send diagnostic info to background console
 function sendDiagnostic(msg) {
   console.log('[OFFSCREEN]', msg);
@@ -199,9 +200,11 @@ function concatStreamChunks() {
 // Check if we need to swap the blob (playback head near buffer edge).
 function needsSwap() {
   if (!streamAudio || !streamBlobUrl) return true; // first swap
+  // Debounce: don't swap too frequently
+  if (Date.now() - streamLastSwapTime < SWAP_MIN_INTERVAL) return false;
   const pos = streamAudio.currentTime;
   const remain = streamBlobDuration - pos;
-  // Account for playback rate: at 2x speed, 2s of buffer drains in 1s wall-clock
+  // Account for playback rate: at 2x speed, 4s of buffer drains in 2s wall-clock
   const effectiveRemain = remain * streamPlaybackRate;
   return effectiveRemain <= SWAP_MARGIN;
 }
@@ -210,6 +213,7 @@ function needsSwap() {
 // Preserves playback position, rate, and play/pause state.
 function swapStreamingBlob() {
   initStreamingAudio();
+  streamLastSwapTime = Date.now();
 
   const currentTime = streamAudio.currentTime;
   const wasPlaying = streamIsPlaying && !streamIsPaused && !streamAudio.paused;
@@ -274,8 +278,8 @@ function stopStreaming() {
   streamChunks = [];
   streamBlobDuration = 0;
   streamPlaybackRate = 1;
+  streamLastSwapTime = 0;
 }
-
 // Reset streaming state before a new session.
 function resetStreaming() {
   sendDiagnostic('Resetting streaming state');
