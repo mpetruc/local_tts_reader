@@ -426,6 +426,7 @@ async function startStreamingAudio(text, settings) {
           voice: settings.voice,
           input: text,
           speed: parseFloat(settings.speed) || 1,
+          response_format: settings.outputFormat || 'mp3',
           return_timestamps: true,
           stream: false
         })
@@ -483,7 +484,8 @@ async function startStreamingAudio(text, settings) {
         body: JSON.stringify({
           model: 'tts-1',
           voice: settings.voice,
-          input: text
+          input: text,
+          response_format: settings.outputFormat || 'mp3'
         })
       });
 
@@ -492,7 +494,9 @@ async function startStreamingAudio(text, settings) {
       }
 
       const audioBlob = await response.blob();
-      mimeType = audioBlob.type || 'audio/mpeg';
+      // Use server-provided type, fallback to format-based mapping
+      const FORMAT_MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', pcm: 'audio/pcm' };
+      mimeType = audioBlob.type || FORMAT_MIME[settings.outputFormat] || 'audio/mpeg';
       audioBytes = new Uint8Array(await audioBlob.arrayBuffer());
     }
 
@@ -503,7 +507,8 @@ async function startStreamingAudio(text, settings) {
     // MV3 service workers lack URL.createObjectURL, so we use a data URL.
     if (isRecording) {
       const base64 = uint8ArrayToBase64(audioBytes);
-      const ext = mimeType.includes('wav') ? 'wav' : 'mp3';
+      const FORMAT_EXT = { mp3: 'mp3', wav: 'wav', pcm: 'pcm' };
+      const ext = FORMAT_EXT[settings.outputFormat] || 'mp3';
       const now = new Date();
       const ts = now.getFullYear()
         + String(now.getMonth() + 1).padStart(2, '0')

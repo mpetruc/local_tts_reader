@@ -65,7 +65,8 @@ function getSettings() {
     speed: document.getElementById('speed').value,
     recordAudio: document.getElementById('recordAudio').checked,
     preprocessText: document.getElementById('preprocessText').checked,
-    highlightSentences: document.getElementById('highlightSentences').checked
+    highlightSentences: document.getElementById('highlightSentences').checked,
+    outputFormat: document.getElementById('outputFormat').value
   };
 }
 
@@ -237,7 +238,8 @@ document.addEventListener('DOMContentLoaded', async function() {
     speed: DEFAULT_SETTINGS.speed,
     recordAudio: DEFAULT_SETTINGS.recordAudio,
     preprocessText: DEFAULT_SETTINGS.preprocessText,
-    highlightSentences: DEFAULT_SETTINGS.highlightSentences
+    highlightSentences: DEFAULT_SETTINGS.highlightSentences,
+    outputFormat: DEFAULT_SETTINGS.outputFormat
   });
 
   document.getElementById('serverUrl').value = result.serverUrl;
@@ -246,7 +248,7 @@ document.addEventListener('DOMContentLoaded', async function() {
   document.getElementById('preprocessText').checked = result.preprocessText;
   document.querySelector('.speed-value').textContent = `${result.speed}x`;
   document.getElementById('highlightSentences').checked = result.highlightSentences;
-
+  document.getElementById('outputFormat').value = result.outputFormat;
   // Populate voice list from server (needs serverUrl set first)
   await populateVoices();
 
@@ -368,7 +370,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
   });
   // Save settings
-  ['serverUrl', 'voice', 'speed', 'recordAudio', 'preprocessText', 'highlightSentences'].forEach(id => {
+  ['serverUrl', 'voice', 'speed', 'recordAudio', 'preprocessText', 'highlightSentences', 'outputFormat'].forEach(id => {
     document.getElementById(id).addEventListener('change', saveSettings);
   });
   

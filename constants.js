@@ -4,7 +4,8 @@ const DEFAULT_SETTINGS = {
     speed: 1.0,
     recordAudio: false,
     preprocessText: true,
-    highlightSentences: false
+    highlightSentences: false,
+    outputFormat: 'mp3'
   };
   
   if (typeof module !== 'undefined' && module.exports) {
