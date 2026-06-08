@@ -356,7 +356,7 @@ function uint8ArrayToBase64(bytes) {
 // Chunk size kept small (256KB) to stay under Chrome's internal
 // sendMessage payload limit (structured-clone of a plain Array of
 // numbers is ~7x the raw byte size).
-async function sendAudioChunks(audioBytes, mimeType) {
+async function sendAudioChunks(audioBytes, mimeType, rate = 1) {
   const CHUNK_SIZE = 256 * 1024; // 256 KB
   const totalChunks = Math.ceil(audioBytes.length / CHUNK_SIZE);
   console.log('[BG] Sending', totalChunks, 'audio chunks (', audioBytes.length, 'bytes total)');
@@ -384,6 +384,7 @@ async function sendAudioChunks(audioBytes, mimeType) {
         index: i,
         isLast: i === totalChunks - 1,
         mimeType: mimeType,
+        rate: i === totalChunks - 1 ? rate : undefined,
         isRecording: isRecording
       });
       console.log('[BG] Chunk', i, '/', totalChunks - 1, 'sent (', chunkArray.length, 'elements)');
@@ -394,7 +395,6 @@ async function sendAudioChunks(audioBytes, mimeType) {
   }
   console.log('[BG] All', totalChunks, 'chunks sent successfully');
 }
-
 // Start streaming audio from the TTS server
 async function startStreamingAudio(text, settings) {
   try {
@@ -497,11 +497,7 @@ async function startStreamingAudio(text, settings) {
     }
 
     // Send audio to offscreen document and set playback rate
-    sendAudioChunks(audioBytes, mimeType);
-    chrome.runtime.sendMessage({
-      type: 'setRate',
-      rate: parseFloat(settings.speed)
-    });
+    await sendAudioChunks(audioBytes, mimeType, parseFloat(settings.speed));
 
     // Auto-download audio file if "Save audio" is enabled.
     // MV3 service workers lack URL.createObjectURL, so we use a data URL.

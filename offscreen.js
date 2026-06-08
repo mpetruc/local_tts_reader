@@ -33,7 +33,7 @@ function initAudio() {
 }
 
 // Process audio data received from background script
-function processAudioData(audioDataArray, mimeType) {
+function processAudioData(audioDataArray, mimeType, rate) {
   try {
     initAudio();
     
@@ -47,7 +47,7 @@ function processAudioData(audioDataArray, mimeType) {
     const audioUrl = URL.createObjectURL(blob);
     
     // Play the audio
-    playAudioUrl(audioUrl);
+    playAudioUrl(audioUrl, rate);
     
     // Notify that audio is ready to play
     chrome.runtime.sendMessage({ type: 'audioReady' });
@@ -61,12 +61,18 @@ function processAudioData(audioDataArray, mimeType) {
 }
 
 // Play audio from URL
-function playAudioUrl(audioUrl) {
+function playAudioUrl(audioUrl, rate) {
   try {
-    console.log('Playing audio URL:', audioUrl);
+    console.log('[OFFSCREEN] Playing audio URL:', audioUrl);
 
     // Set up audio element
     audioElement.src = audioUrl;
+
+    // Apply playback rate AFTER src is set (setting src can reset playbackRate)
+    if (rate && !isNaN(rate) && rate > 0) {
+      audioElement.playbackRate = rate;
+      console.log('[OFFSCREEN] Playback rate set to:', rate);
+    }
 
     // Set up event listeners
     audioElement.onplay = () => {
@@ -105,13 +111,14 @@ function playAudioUrl(audioUrl) {
       });
     });
   } catch (error) {
-    console.error('Error playing audio URL:', error);
+    console.error('Error playing audio:', error);
     chrome.runtime.sendMessage({
       type: 'streamError',
       error: error.message
     });
   }
 }
+
 
 // Get current player state
 function getPlayerState() {
@@ -161,7 +168,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Combine all chunks using batched concat
         const combined = concatAll(audioChunks);
         console.log('[OFFSCREEN] Combined array length:', combined.length);
-        processAudioData(combined, message.mimeType);
+        processAudioData(combined, message.mimeType, message.rate);
         audioChunks = [];
       }
       break;
