@@ -415,6 +415,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       appendStreamingChunk(message.chunk);
       console.log('[OFFSCREEN] Buffer: frames=', bufferLength, 'duration=', (bufferLength / SAMPLE_RATE).toFixed(2), 's');
+      // Echo diagnostic back to background console
+      chrome.runtime.sendMessage({ type: 'streamingDiagnostic', frames: bufferLength, playing: isStreamingPlaying, paused: isStreamingPaused });
 
       // Start playing on first chunk if not already playing
       if (!isStreamingPlaying && !isStreamingPaused) {

@@ -315,6 +315,10 @@ case 'startStreaming':
         currentWordIndex = -1;
       }
       return true;
+      
+    case 'streamingDiagnostic':
+      console.log('[BG] streamingDiagnostic from offscreen:', message);
+      return true;
   }
 });
 
