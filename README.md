@@ -1,3 +1,33 @@
+# Changes Since Original Release
+
+The following features and improvements have been added since the original (baseline) version of Local TTS Reader:
+
+## Real-Time Streaming Playback
+- Audio begins playing as soon as the first chunk arrives from the TTS server — no more waiting for the full response before playback starts.
+- Text is split into sentence-bounded chunks (default 400 chars), each synthesized and streamed independently.
+- Uses an `audio` element with lazy WAV-blob swapping: new PCM data is appended to the current blob only when the playback head nears the end, eliminating stutter.
+- Full transport controls during streaming: **play**, **pause**, **stop** (aborts in-flight requests), and **speed changes** — all handled client-side at 1× server output.
+
+## Long-Text Audio Support
+- Replaced the original `Array.concat(...chunks)` approach (which hit V8's argument limit) with a safe batched `concatAll` for combining large audio responses.
+- Chunk size reduced to 256 KB to stay under Chrome's `runtime.sendMessage` payload limit; audio is sent incrementally with progress logging.
+- Offscreen document liveness is verified via `ping` before sending; dead documents are automatically recreated.
+
+## Output Format Selector
+- Choose the TTS response format: **MP3**, **WAV**, or **PCM** (configurable in the popup UI).
+- Raw PCM responses are automatically wrapped in a WAV container so browsers can play them natively.
+
+## Multi-Backend Voice Discovery
+- Voice list is now fetched from multiple endpoint patterns (`/v1/audio/voices` for Kokoro/OpenAI-compatible backends, `/v1/voices` for Omnivoice) in priority order — the first successful response wins.
+- Voice payload is normalised across backends (string arrays, `{id, name}` objects, etc.).
+
+## Robust Offscreen Audio Context
+- Offscreen document is pinged before every audio transfer; stale or killed contexts are detected and recreated automatically.
+- Streaming playback uses debounced blob swaps, deferred `onpause`/`onended` handlers, and a `streamSwappingSrc` guard to prevent spurious state transitions.
+
+---
+
+
 # Local TTS Reader - Chrome Extension
 
 A sleek Chrome extension that converts webpage text to speech using a local OpenAI-compatible TTS server. Features include voice selection, speed control, and the ability to save audio files.
