@@ -1,0 +1,12 @@
+# pi agent files
+.pi/
+AGENTS.md
+.setup_complete
+
+# Backup files
+*.bak
+
+# Planning / internal docs
+plan.md
+PLAN-*.md
+no-audio-out-troubshooting-results.md
